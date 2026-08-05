@@ -1,0 +1,38 @@
+{
+  "name": "distributed-order-platform-qa",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Quality Assurance portfolio project focused on testing a distributed order-processing platform composed of REST APIs, databases, asynchronous messages, and external service dependencies.",
+  "type": "module",
+  "workspaces": [
+    "services/*",
+    "packages/*",
+    "tests"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down --remove-orphans",
+    "docker:logs": "docker compose logs -f"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  },
+  "keywords": [
+    "quality-assurance",
+    "microservices",
+    "integration-testing",
+    "api-testing",
+    "playwright",
+    "typescript",
+    "rabbitmq",
+    "postgresql",
+    "docker"
+  ],
+  "author": "Lidia Martinelli",
+  "license": "MIT",
+  "packageManager": "npm@11.16.0"
+}
