@@ -8,6 +8,11 @@ This project is currently in the planning and environment setup phase.
 
 The test documentation, infrastructure, services, automated tests, execution evidence, and CI pipeline will be developed incrementally.
 
+## Documentation
+
+- [Planned System Architecture](docs/architecture.md)
+- [Project Status](docs/project-status.md)
+
 ## System Scenario
 
 The application simulates an e-commerce order workflow distributed across multiple services:
