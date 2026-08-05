@@ -1,0 +1,17 @@
+{
+  "name": "@distributed-order-platform/api-tests",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --project tsconfig.json --noEmit",
+    "test": "playwright test",
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.2",
+    "@types/pg": "^8.20.4",
+    "dotenv": "^17.4.2",
+    "pg": "^8.22.0"
+  }
+}

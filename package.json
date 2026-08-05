@@ -12,7 +12,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
+    "test": "playwright test --config tests/playwright.config.ts",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down --remove-orphans",
     "docker:logs": "docker compose logs -f"
