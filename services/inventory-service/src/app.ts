@@ -1,7 +1,34 @@
 ﻿import express, { type Express } from 'express';
 
+import type { ErrorRequestHandler } from 'express';
+
 import { checkInventoryDatabaseConnection } from './database/pool.js';
 import { inventoryRouter } from './routes/inventory.js';
+import { reservationsRouter } from './routes/reservations.js';
+
+const malformedJsonErrorHandler: ErrorRequestHandler = (
+  error,
+  _request,
+  response,
+  next,
+) => {
+  if (
+    error instanceof SyntaxError &&
+    Reflect.get(error, 'status') === 400
+  ) {
+    response.status(400).json({
+      code: 'INVALID_RESERVATION_REQUEST',
+      message: 'The reservation request is invalid.',
+      details: {
+        field: 'body',
+        reason: 'must contain valid JSON.',
+      },
+    });
+    return;
+  }
+
+  next(error);
+};
 
 export function createApp(): Express {
   const app = express();
@@ -9,6 +36,7 @@ export function createApp(): Express {
   app.disable('x-powered-by');
   app.use(express.json());
   app.use(inventoryRouter);
+  app.use(reservationsRouter);
 
   app.get('/health', async (_request, response) => {
     try {
@@ -44,6 +72,8 @@ export function createApp(): Express {
       });
     }
   });
+
+  app.use(malformedJsonErrorHandler);
 
   return app;
 }
