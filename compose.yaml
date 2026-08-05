@@ -1,0 +1,66 @@
+name: distributed-order-platform-qa
+
+services:
+  postgres:
+    image: postgres:18.4-alpine
+    container_name: dop-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./infrastructure/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - order-platform-network
+
+  rabbitmq:
+    image: rabbitmq:4.3.4-management-alpine
+    container_name: dop-rabbitmq
+    hostname: dop-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_DEFAULT_VHOST}
+    ports:
+      - "${RABBITMQ_AMQP_PORT}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "rabbitmq-diagnostics",
+          "-q",
+          "ping"
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+    networks:
+      - order-platform-network
+
+volumes:
+  postgres_data:
+    name: dop-postgres-data
+  rabbitmq_data:
+    name: dop-rabbitmq-data
+
+networks:
+  order-platform-network:
+    name: dop-network
+    driver: bridge
