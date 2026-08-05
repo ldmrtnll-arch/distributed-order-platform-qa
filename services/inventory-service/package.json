@@ -1,0 +1,23 @@
+{
+  "name": "@distributed-order-platform/inventory-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Inventory microservice for the Distributed Order Platform.",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "build": "tsc --project tsconfig.json",
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6"
+  },
+  "dependencies": {
+    "express": "^5.2.1"
+  }
+}
