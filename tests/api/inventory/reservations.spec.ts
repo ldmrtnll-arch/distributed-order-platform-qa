@@ -279,4 +279,124 @@ test.describe('POST /reservations', () => {
       availableQuantity: 4,
     });
   });
+
+  test('returns not found without changing inventory for an unknown SKU', async ({
+    request,
+  }) => {
+    const orderId = randomUUID();
+    const idempotencyKey = `reservation-${randomUUID()}`;
+
+    const reservationResponse = await request.post('/reservations', {
+      headers: {
+        'Idempotency-Key': idempotencyKey,
+        'X-Correlation-Id': `correlation-${randomUUID()}`,
+      },
+      data: {
+        orderId,
+        sku: ' unknown-reservation-001 ',
+        quantity: 1,
+      },
+    });
+
+    expect(reservationResponse.status()).toBe(404);
+    expect(reservationResponse.headers()['content-type']).toMatch(
+      /^application\/json(?:;|$)/,
+    );
+    expect(reservationResponse.headers()).not.toHaveProperty(
+      'x-powered-by',
+    );
+    expect(reservationResponse.headers()).not.toHaveProperty(
+      'idempotent-replay',
+    );
+    await expect(reservationResponse.json()).resolves.toEqual({
+      code: 'INVENTORY_ITEM_NOT_FOUND',
+      message: 'Inventory item not found.',
+      details: {
+        sku: 'UNKNOWN-RESERVATION-001',
+      },
+    });
+
+    const inventoryResponse = await request.get(
+      '/inventory/UNKNOWN-RESERVATION-001',
+    );
+
+    expect(inventoryResponse.status()).toBe(404);
+    expect(inventoryResponse.headers()['content-type']).toMatch(
+      /^application\/json(?:;|$)/,
+    );
+    expect(inventoryResponse.headers()).not.toHaveProperty('x-powered-by');
+    await expect(inventoryResponse.json()).resolves.toEqual({
+      code: 'INVENTORY_ITEM_NOT_FOUND',
+      message: 'Inventory item not found.',
+      details: {
+        sku: 'UNKNOWN-RESERVATION-001',
+      },
+    });
+  });
+
+  test('rejects a reservation when available stock is insufficient', async ({
+    request,
+  }) => {
+    const inventoryBeforeResponse = await request.get(
+      '/inventory/RESERVATION-INSUFFICIENT-001',
+    );
+    const inventoryBefore = await readInventoryItem(
+      inventoryBeforeResponse,
+    );
+
+    expect(inventoryBefore).toMatchObject({
+      sku: 'RESERVATION-INSUFFICIENT-001',
+      totalQuantity: 2,
+      reservedQuantity: 0,
+      availableQuantity: 2,
+    });
+
+    const orderId = randomUUID();
+    const idempotencyKey = `reservation-${randomUUID()}`;
+    const reservationResponse = await request.post('/reservations', {
+      headers: {
+        'Idempotency-Key': idempotencyKey,
+        'X-Correlation-Id': `correlation-${randomUUID()}`,
+      },
+      data: {
+        orderId,
+        sku: 'RESERVATION-INSUFFICIENT-001',
+        quantity: 3,
+      },
+    });
+
+    expect(reservationResponse.status()).toBe(409);
+    expect(reservationResponse.headers()['content-type']).toMatch(
+      /^application\/json(?:;|$)/,
+    );
+    expect(reservationResponse.headers()).not.toHaveProperty(
+      'x-powered-by',
+    );
+    expect(reservationResponse.headers()).not.toHaveProperty(
+      'idempotent-replay',
+    );
+    await expect(reservationResponse.json()).resolves.toEqual({
+      code: 'INVENTORY_INSUFFICIENT_STOCK',
+      message: 'Insufficient inventory for the requested quantity.',
+      details: {
+        sku: 'RESERVATION-INSUFFICIENT-001',
+        requestedQuantity: 3,
+        availableQuantity: 2,
+      },
+    });
+
+    const inventoryAfterResponse = await request.get(
+      '/inventory/RESERVATION-INSUFFICIENT-001',
+    );
+    const inventoryAfter = await readInventoryItem(
+      inventoryAfterResponse,
+    );
+
+    expect(inventoryAfter).toMatchObject({
+      sku: 'RESERVATION-INSUFFICIENT-001',
+      totalQuantity: 2,
+      reservedQuantity: 0,
+      availableQuantity: 2,
+    });
+  });
 });

@@ -95,6 +95,12 @@ export default async function globalSetup(): Promise<void> {
           'Reservation Conflict Test Product',
           5,
           0
+        ),
+        (
+          'RESERVATION-INSUFFICIENT-001',
+          'Reservation Insufficient Stock Test Product',
+          2,
+          0
         )
       ON CONFLICT (sku)
       DO UPDATE SET
