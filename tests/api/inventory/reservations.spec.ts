@@ -431,6 +431,12 @@ const payloadTestCases: PayloadTestCase[] = [
   },
 ];
 
+function concurrencySku(baseSku: string, repeatEachIndex: number): string {
+  return repeatEachIndex === 0
+    ? baseSku
+    : `${baseSku}-REPEAT-${repeatEachIndex}`;
+}
+
 test.describe('POST /reservations', () => {
   test('creates a reservation and replays the same request idempotently', async ({
     request,
@@ -747,6 +753,191 @@ test.describe('POST /reservations', () => {
       totalQuantity: 2,
       reservedQuantity: 0,
       availableQuantity: 2,
+    });
+  });
+
+  test('prevents overselling when concurrent reservations dispute the last units', async ({
+    request,
+  }, testInfo) => {
+    const sku = concurrencySku(
+      'RESERVATION-CONCURRENCY-STOCK-001',
+      testInfo.repeatEachIndex,
+    );
+    const inventoryBeforeResponse = await request.get(`/inventory/${sku}`);
+    const inventoryBefore = await readInventoryItem(
+      inventoryBeforeResponse,
+    );
+
+    expect(inventoryBefore).toMatchObject({
+      sku,
+      totalQuantity: 2,
+      reservedQuantity: 0,
+      availableQuantity: 2,
+    });
+
+    const firstOrderId = randomUUID();
+    const secondOrderId = randomUUID();
+    const [firstResponse, secondResponse] = await Promise.all([
+      request.post('/reservations', {
+        headers: {
+          'Idempotency-Key': `reservation-${randomUUID()}`,
+          'X-Correlation-Id': `correlation-${randomUUID()}`,
+        },
+        data: { orderId: firstOrderId, sku, quantity: 2 },
+      }),
+      request.post('/reservations', {
+        headers: {
+          'Idempotency-Key': `reservation-${randomUUID()}`,
+          'X-Correlation-Id': `correlation-${randomUUID()}`,
+        },
+        data: { orderId: secondOrderId, sku, quantity: 2 },
+      }),
+    ]);
+    const responses = [firstResponse, secondResponse];
+
+    expect(responses.map((response) => response.status()).sort()).toEqual([
+      201,
+      409,
+    ]);
+
+    const createdResponse = responses.find(
+      (response) => response.status() === 201,
+    );
+    const rejectedResponse = responses.find(
+      (response) => response.status() === 409,
+    );
+
+    if (createdResponse === undefined || rejectedResponse === undefined) {
+      throw new Error('Expected one created and one rejected response.');
+    }
+
+    expect(createdResponse.headers()).not.toHaveProperty(
+      'idempotent-replay',
+    );
+    const createdReservation = await readReservation(
+      createdResponse,
+      201,
+    );
+
+    expect([firstOrderId, secondOrderId]).toContain(
+      createdReservation.orderId,
+    );
+    expect(createdReservation).toMatchObject({
+      sku,
+      quantity: 2,
+      status: 'RESERVED',
+    });
+
+    expect(rejectedResponse.headers()['content-type']).toMatch(
+      /^application\/json(?:;|$)/,
+    );
+    expect(rejectedResponse.headers()).not.toHaveProperty('x-powered-by');
+    expect(rejectedResponse.headers()).not.toHaveProperty(
+      'idempotent-replay',
+    );
+    await expect(rejectedResponse.json()).resolves.toEqual({
+      code: 'INVENTORY_INSUFFICIENT_STOCK',
+      message: 'Insufficient inventory for the requested quantity.',
+      details: {
+        sku,
+        requestedQuantity: 2,
+        availableQuantity: 0,
+      },
+    });
+
+    const inventoryAfterResponse = await request.get(`/inventory/${sku}`);
+    const inventoryAfter = await readInventoryItem(inventoryAfterResponse);
+
+    expect(inventoryAfter).toMatchObject({
+      sku,
+      totalQuantity: 2,
+      reservedQuantity: 2,
+      availableQuantity: 0,
+    });
+  });
+
+  test('creates only one reservation for concurrent requests with the same idempotency key', async ({
+    request,
+  }, testInfo) => {
+    const sku = concurrencySku(
+      'RESERVATION-CONCURRENCY-IDEMP-001',
+      testInfo.repeatEachIndex,
+    );
+    const inventoryBeforeResponse = await request.get(`/inventory/${sku}`);
+    const inventoryBefore = await readInventoryItem(
+      inventoryBeforeResponse,
+    );
+
+    expect(inventoryBefore).toMatchObject({
+      sku,
+      totalQuantity: 5,
+      reservedQuantity: 0,
+      availableQuantity: 5,
+    });
+
+    const orderId = randomUUID();
+    const idempotencyKey = `reservation-${randomUUID()}`;
+    const requestBody = { orderId, sku, quantity: 2 };
+    const headers = {
+      'Idempotency-Key': idempotencyKey,
+      'X-Correlation-Id': `correlation-${randomUUID()}`,
+    };
+    const [firstResponse, secondResponse] = await Promise.all([
+      request.post('/reservations', { headers, data: requestBody }),
+      request.post('/reservations', { headers, data: requestBody }),
+    ]);
+    const responses = [firstResponse, secondResponse];
+
+    expect(responses.map((response) => response.status()).sort()).toEqual([
+      200,
+      201,
+    ]);
+
+    const createdResponse = responses.find(
+      (response) => response.status() === 201,
+    );
+    const replayResponse = responses.find(
+      (response) => response.status() === 200,
+    );
+
+    if (createdResponse === undefined || replayResponse === undefined) {
+      throw new Error('Expected one created and one replayed response.');
+    }
+
+    expect(createdResponse.headers()).not.toHaveProperty(
+      'idempotent-replay',
+    );
+    expect(replayResponse.headers()['idempotent-replay']).toBe('true');
+
+    const createdReservation = await readReservation(
+      createdResponse,
+      201,
+    );
+    const replayedReservation = await readReservation(
+      replayResponse,
+      200,
+    );
+
+    expect(createdReservation).toMatchObject({
+      orderId,
+      sku,
+      quantity: 2,
+      status: 'RESERVED',
+    });
+    expect(replayedReservation).toEqual(createdReservation);
+    expect(replayedReservation.reservationId).toBe(
+      createdReservation.reservationId,
+    );
+    expect(replayedReservation.createdAt).toBe(createdReservation.createdAt);
+
+    const inventoryAfterResponse = await request.get(`/inventory/${sku}`);
+    const inventoryAfter = await readInventoryItem(inventoryAfterResponse);
+
+    expect(inventoryAfter).toMatchObject({
+      sku,
+      totalQuantity: 5,
+      reservedQuantity: 2,
+      availableQuantity: 3,
     });
   });
 

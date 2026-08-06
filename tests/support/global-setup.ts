@@ -217,6 +217,45 @@ export default async function globalSetup(): Promise<void> {
         reserved_quantity = 0
     `);
 
+    await client.query(`
+      INSERT INTO products (
+        sku,
+        name,
+        total_quantity,
+        reserved_quantity
+      )
+      SELECT
+        product.sku || CASE
+          WHEN repetition.index = 0 THEN ''
+          ELSE '-REPEAT-' || repetition.index
+        END,
+        product.name || CASE
+          WHEN repetition.index = 0 THEN ''
+          ELSE ' Repeat ' || repetition.index
+        END,
+        product.total_quantity,
+        0
+      FROM (
+        VALUES
+          (
+            'RESERVATION-CONCURRENCY-STOCK-001',
+            'Reservation Stock Concurrency Test Product',
+            2
+          ),
+          (
+            'RESERVATION-CONCURRENCY-IDEMP-001',
+            'Reservation Idempotency Concurrency Test Product',
+            5
+          )
+      ) AS product(sku, name, total_quantity)
+      CROSS JOIN generate_series(0, 9) AS repetition(index)
+      ON CONFLICT (sku)
+      DO UPDATE SET
+        name = EXCLUDED.name,
+        total_quantity = EXCLUDED.total_quantity,
+        reserved_quantity = 0
+    `);
+
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined);
