@@ -43,7 +43,12 @@ export default async function globalSetup(): Promise<void> {
     'database',
   );
 
-  const [productsMigration, reservationsMigration, productsSeed] =
+  const [
+    productsMigration,
+    reservationsMigration,
+    reservationReleaseMigration,
+    productsSeed,
+  ] =
     await Promise.all([
       readFile(
         path.join(
@@ -58,6 +63,14 @@ export default async function globalSetup(): Promise<void> {
           databaseDirectory,
           'migrations',
           '002_create_inventory_reservations.sql',
+        ),
+        'utf8',
+      ),
+      readFile(
+        path.join(
+          databaseDirectory,
+          'migrations',
+          '003_add_reservation_release.sql',
         ),
         'utf8',
       ),
@@ -91,6 +104,7 @@ export default async function globalSetup(): Promise<void> {
 
     await inventoryClient.query(productsMigration);
     await inventoryClient.query(reservationsMigration);
+    await inventoryClient.query(reservationReleaseMigration);
 
     await inventoryClient.query('BEGIN');
 
@@ -127,6 +141,12 @@ export default async function globalSetup(): Promise<void> {
           'RESERVATION-INSUFFICIENT-001',
           'Reservation Insufficient Stock Test Product',
           2,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-IDEMP-001',
+          'Reservation Release Idempotency Test Product',
+          5,
           0
         ),
         (
