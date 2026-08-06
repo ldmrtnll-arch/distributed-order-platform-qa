@@ -180,6 +180,30 @@ export default async function globalSetup(): Promise<void> {
           0
         ),
         (
+          'RESERVATION-RELEASE-DB-PERSISTENCE',
+          'Reservation Release Database Persistence Test Product',
+          10,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-DB-REPLAY',
+          'Reservation Release Database Replay Test Product',
+          10,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-DB-CONFLICT-A',
+          'Reservation Release Database Conflict First Product',
+          10,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-DB-CONFLICT-B',
+          'Reservation Release Database Conflict Second Product',
+          10,
+          0
+        ),
+        (
           'RESERVATION-RELEASE-VALIDATION-HEADER-MISSING',
           'Reservation Release Missing Header Test Product',
           5,
