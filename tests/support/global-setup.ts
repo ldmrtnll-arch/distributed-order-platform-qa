@@ -150,6 +150,24 @@ export default async function globalSetup(): Promise<void> {
           0
         ),
         (
+          'RESERVATION-RELEASE-ALREADY-001',
+          'Reservation Already Released Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-CONFLICT-A-001',
+          'Reservation Release Key Conflict First Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-CONFLICT-B-001',
+          'Reservation Release Key Conflict Second Product',
+          5,
+          0
+        ),
+        (
           'RESERVATION-VALIDATION-HEADER-MISSING',
           'Reservation Validation Header Missing Test Product',
           3,
