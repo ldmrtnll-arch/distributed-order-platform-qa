@@ -274,4 +274,111 @@ test.describe('POST /payments', () => {
       'tok_unknown_test_value',
     ]);
   });
+
+  test('rejects reuse of an idempotency key with different payment data', async ({
+    request,
+  }) => {
+    const orderId = randomUUID();
+    const idempotencyKey = `payment-${randomUUID()}`;
+    const originalRequestBody = {
+      orderId,
+      amountInCents: 12500,
+      currency: 'BRL',
+      paymentToken: 'tok_approved',
+    };
+
+    const creationResponse = await request.post(
+      'http://127.0.0.1:3003/payments',
+      {
+        headers: {
+          'Idempotency-Key': idempotencyKey,
+          'X-Correlation-Id': `correlation-${randomUUID()}`,
+        },
+        data: originalRequestBody,
+      },
+    );
+
+    expect(creationResponse.headers()).not.toHaveProperty(
+      'idempotent-replay',
+    );
+    const originalPayment = await readApprovedPayment(
+      creationResponse,
+      201,
+    );
+
+    expect(originalPayment).toEqual({
+      paymentId: originalPayment.paymentId,
+      orderId,
+      amountInCents: 12500,
+      currency: 'BRL',
+      status: 'APPROVED',
+      createdAt: originalPayment.createdAt,
+    });
+    expectSafePaymentBody(originalPayment);
+
+    const conflictResponse = await request.post(
+      'http://127.0.0.1:3003/payments',
+      {
+        headers: {
+          'Idempotency-Key': idempotencyKey,
+          'X-Correlation-Id': `correlation-${randomUUID()}`,
+        },
+        data: {
+          ...originalRequestBody,
+          paymentToken: 'tok_declined',
+        },
+      },
+    );
+
+    expect(conflictResponse.status()).toBe(409);
+    expect(conflictResponse.headers()['content-type']).toMatch(
+      /^application\/json(?:;|$)/,
+    );
+    expect(conflictResponse.headers()).not.toHaveProperty('x-powered-by');
+    expect(conflictResponse.headers()).not.toHaveProperty(
+      'idempotent-replay',
+    );
+
+    const conflictBody = (await conflictResponse.json()) as unknown;
+
+    expect(conflictBody).toEqual({
+      code: 'IDEMPOTENCY_KEY_CONFLICT',
+      message:
+        'The idempotency key was already used with a different request.',
+    });
+
+    const serializedConflict = JSON.stringify(conflictBody);
+
+    expect(serializedConflict).not.toContain('tok_approved');
+    expect(serializedConflict).not.toContain('tok_declined');
+    expect(serializedConflict).not.toContain('paymentToken');
+    expect(serializedConflict).not.toContain(originalPayment.paymentId);
+    expect(serializedConflict).not.toMatch(
+      /password|postgres(?:ql)?:\/\/[^\s"]+@|connectionstring|stack|\bselect\b|\binsert\b|\bupdate\b|\bdelete\b/i,
+    );
+
+    const replayResponse = await request.post(
+      'http://127.0.0.1:3003/payments',
+      {
+        headers: {
+          'Idempotency-Key': idempotencyKey,
+          'X-Correlation-Id': `correlation-${randomUUID()}`,
+        },
+        data: originalRequestBody,
+      },
+    );
+
+    expect(replayResponse.headers()['idempotent-replay']).toBe('true');
+    const replayedPayment = await readApprovedPayment(replayResponse, 200);
+
+    expect(replayedPayment).toEqual(originalPayment);
+    expect(replayedPayment.paymentId).toBe(originalPayment.paymentId);
+    expect(replayedPayment.createdAt).toBe(originalPayment.createdAt);
+    expect(replayedPayment.status).toBe('APPROVED');
+    expect(replayedPayment).not.toHaveProperty('declineCode');
+    expectSafePaymentBody(replayedPayment, [
+      'tok_approved',
+      'tok_declined',
+    ]);
+  });
 });
