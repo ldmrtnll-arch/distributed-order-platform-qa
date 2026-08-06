@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 
-import { expect, test, type APIResponse } from '@playwright/test';
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type APIResponse,
+} from '@playwright/test';
 
 interface InventoryItemResponse {
   sku: string;
@@ -37,6 +42,13 @@ interface ValidationTestCase {
           reason: string;
         };
       };
+}
+
+interface PayloadTestCase {
+  name: string;
+  controlSku: string;
+  sendRequest: (request: APIRequestContext) => Promise<APIResponse>;
+  expectedReason: 'must be a JSON object.' | 'must contain valid JSON.';
 }
 
 const reservationResponseFields = [
@@ -112,6 +124,35 @@ async function expectInvalidReservationResponse(
   expect(response.headers()).not.toHaveProperty('x-powered-by');
   expect(response.headers()).not.toHaveProperty('idempotent-replay');
   await expect(response.json()).resolves.toEqual(expectedBody);
+}
+
+async function expectInvalidPayloadResponse(
+  response: APIResponse,
+  expectedReason: PayloadTestCase['expectedReason'],
+): Promise<void> {
+  expect(response.status()).toBe(400);
+  expect(response.headers()['content-type']).toMatch(
+    /^application\/json(?:;|$)/,
+  );
+  expect(response.headers()).not.toHaveProperty('x-powered-by');
+  expect(response.headers()).not.toHaveProperty('idempotent-replay');
+
+  const body: unknown = await response.json();
+
+  expect(body).toEqual({
+    code: 'INVALID_RESERVATION_REQUEST',
+    message: 'The reservation request is invalid.',
+    details: {
+      field: 'body',
+      reason: expectedReason,
+    },
+  });
+
+  const serializedBody = JSON.stringify(body);
+
+  expect(serializedBody).not.toMatch(
+    /unexpected token|json parse|syntaxerror|stack|password|connectionstring|postgres(?:ql)?|\bsql\b|\bselect\b|\binsert\b|\bupdate\b|\bdelete\b|[a-z]:\\\\|\/services\//i,
+  );
 }
 
 const validHeaders = (): Record<string, string> => ({
@@ -312,6 +353,81 @@ const validationTestCases: ValidationTestCase[] = [
       message: 'The reservation request is invalid.',
       details: { field: 'unexpectedField', reason: 'is not allowed.' },
     },
+  },
+];
+
+const payloadTestCases: PayloadTestCase[] = [
+  {
+    name: 'rejects a completely missing request body',
+    controlSku: 'RESERVATION-PAYLOAD-EMPTY',
+    sendRequest: (request) =>
+      request.post('/reservations', {
+        headers: validHeaders(),
+      }),
+    expectedReason: 'must be a JSON object.',
+  },
+  {
+    name: 'rejects a JSON array request body',
+    controlSku: 'RESERVATION-PAYLOAD-ARRAY',
+    sendRequest: (request) =>
+      request.post('/reservations', {
+        headers: {
+          ...validHeaders(),
+          'Content-Type': 'application/json',
+        },
+        data: [],
+      }),
+    expectedReason: 'must be a JSON object.',
+  },
+  {
+    name: 'rejects malformed JSON without exposing parser details',
+    controlSku: 'RESERVATION-PAYLOAD-MALFORMED',
+    sendRequest: (request) =>
+      request.post('/reservations', {
+        headers: {
+          ...validHeaders(),
+          'Content-Type': 'application/json',
+        },
+        data: `{"orderId":"${randomUUID()}",`,
+      }),
+    expectedReason: 'must contain valid JSON.',
+  },
+  {
+    name: 'rejects a raw JSON body without an application/json Content-Type',
+    controlSku: 'RESERVATION-CONTENT-TYPE-MISSING',
+    sendRequest: (request) => {
+      const headers = validHeaders();
+
+      expect(headers).not.toHaveProperty('Content-Type');
+      expect(headers).not.toHaveProperty('content-type');
+
+      return request.post('/reservations', {
+        headers,
+        data: JSON.stringify({
+          orderId: randomUUID(),
+          sku: 'RESERVATION-CONTENT-TYPE-MISSING',
+          quantity: 1,
+        }),
+      });
+    },
+    expectedReason: 'must be a JSON object.',
+  },
+  {
+    name: 'rejects a raw JSON body with a text/plain Content-Type',
+    controlSku: 'RESERVATION-CONTENT-TYPE-INVALID',
+    sendRequest: (request) =>
+      request.post('/reservations', {
+        headers: {
+          ...validHeaders(),
+          'Content-Type': 'text/plain',
+        },
+        data: JSON.stringify({
+          orderId: randomUUID(),
+          sku: 'RESERVATION-CONTENT-TYPE-INVALID',
+          quantity: 1,
+        }),
+      }),
+    expectedReason: 'must be a JSON object.',
   },
 ];
 
@@ -669,6 +785,45 @@ test.describe('POST /reservations', () => {
 
       expect(inventoryAfter).toMatchObject({
         sku: validationCase.controlSku,
+        totalQuantity: 3,
+        reservedQuantity: 0,
+        availableQuantity: 3,
+      });
+    });
+  }
+
+  for (const payloadCase of payloadTestCases) {
+    test(payloadCase.name, async ({ request }) => {
+      const inventoryBeforeResponse = await request.get(
+        `/inventory/${payloadCase.controlSku}`,
+      );
+      const inventoryBefore = await readInventoryItem(
+        inventoryBeforeResponse,
+      );
+
+      expect(inventoryBefore).toMatchObject({
+        sku: payloadCase.controlSku,
+        totalQuantity: 3,
+        reservedQuantity: 0,
+        availableQuantity: 3,
+      });
+
+      const response = await payloadCase.sendRequest(request);
+
+      await expectInvalidPayloadResponse(
+        response,
+        payloadCase.expectedReason,
+      );
+
+      const inventoryAfterResponse = await request.get(
+        `/inventory/${payloadCase.controlSku}`,
+      );
+      const inventoryAfter = await readInventoryItem(
+        inventoryAfterResponse,
+      );
+
+      expect(inventoryAfter).toMatchObject({
+        sku: payloadCase.controlSku,
         totalQuantity: 3,
         reservedQuantity: 0,
         availableQuantity: 3,

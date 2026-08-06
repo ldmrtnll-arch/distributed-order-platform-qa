@@ -179,6 +179,36 @@ export default async function globalSetup(): Promise<void> {
           'Reservation Validation Unexpected Field Test Product',
           3,
           0
+        ),
+        (
+          'RESERVATION-PAYLOAD-EMPTY',
+          'Reservation Empty Payload Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-PAYLOAD-ARRAY',
+          'Reservation Array Payload Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-PAYLOAD-MALFORMED',
+          'Reservation Malformed Payload Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-CONTENT-TYPE-MISSING',
+          'Reservation Missing Content Type Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-CONTENT-TYPE-INVALID',
+          'Reservation Invalid Content Type Test Product',
+          3,
+          0
         )
       ON CONFLICT (sku)
       DO UPDATE SET
