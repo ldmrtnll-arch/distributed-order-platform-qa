@@ -204,6 +204,12 @@ export default async function globalSetup(): Promise<void> {
           0
         ),
         (
+          'RESERVATION-RELEASE-RESILIENCE-001',
+          'Reservation Release Database Resilience Test Product',
+          10,
+          0
+        ),
+        (
           'RESERVATION-RELEASE-VALIDATION-HEADER-MISSING',
           'Reservation Release Missing Header Test Product',
           5,
