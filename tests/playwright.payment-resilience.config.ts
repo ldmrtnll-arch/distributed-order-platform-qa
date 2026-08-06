@@ -13,21 +13,21 @@ process.env.no_proxy = [process.env.no_proxy, localAddresses]
   .join(',');
 
 export default defineConfig({
-  testDir: './resilience/inventory',
+  testDir: './resilience/payment',
   workers: 1,
   fullyParallel: false,
   forbidOnly: true,
   retries: 0,
-  timeout: 90_000,
-  expect: {
-    timeout: 30_000,
-  },
+  timeout: 120_000,
+  expect: { timeout: 30_000 },
   use: {
-    baseURL: 'http://127.0.0.1:3002',
-    extraHTTPHeaders: {
-      Accept: 'application/json',
-    },
+    baseURL: 'http://127.0.0.1:3003',
+    extraHTTPHeaders: { Accept: 'application/json' },
   },
-  globalSetup: path.join(testsDirectory, 'support', 'global-setup.ts'),
+  globalSetup: path.join(
+    testsDirectory,
+    'support',
+    'payment-global-setup.ts',
+  ),
   reporter: [['list']],
 });

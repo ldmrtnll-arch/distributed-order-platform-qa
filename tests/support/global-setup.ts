@@ -12,14 +12,28 @@ const testsDirectory = path.resolve(
 const repositoryRoot = path.resolve(testsDirectory, '..');
 
 config({
-  path: path.join(repositoryRoot, '.env'),
+  path: [
+    path.join(repositoryRoot, '.env'),
+    path.join(repositoryRoot, '.env.example'),
+  ],
+  quiet: true,
 });
 
 export default async function globalSetup(): Promise<void> {
-  const connectionString = process.env.INVENTORY_DATABASE_URL;
+  const inventoryConnectionString = process.env.INVENTORY_DATABASE_URL;
+  const paymentConnectionString = process.env.PAYMENT_DATABASE_URL;
 
-  if (connectionString === undefined || connectionString.trim() === '') {
+  if (
+    inventoryConnectionString === undefined ||
+    inventoryConnectionString.trim() === ''
+  ) {
     throw new Error('INVENTORY_DATABASE_URL is required for API tests.');
+  }
+  if (
+    paymentConnectionString === undefined ||
+    paymentConnectionString.trim() === ''
+  ) {
+    throw new Error('PAYMENT_DATABASE_URL is required for API tests.');
   }
 
   const databaseDirectory = path.join(
@@ -56,27 +70,40 @@ export default async function globalSetup(): Promise<void> {
         'utf8',
       ),
     ]);
+  const paymentMigration = await readFile(
+    path.join(
+      repositoryRoot,
+      'services',
+      'payment-service',
+      'database',
+      'migrations',
+      '001_create_payments.sql',
+    ),
+    'utf8',
+  );
 
-  const client = new Client({ connectionString });
+  const inventoryClient = new Client({
+    connectionString: inventoryConnectionString,
+  });
 
   try {
-    await client.connect();
+    await inventoryClient.connect();
 
-    await client.query(productsMigration);
-    await client.query(reservationsMigration);
+    await inventoryClient.query(productsMigration);
+    await inventoryClient.query(reservationsMigration);
 
-    await client.query('BEGIN');
+    await inventoryClient.query('BEGIN');
 
-    await client.query('DELETE FROM inventory_reservations');
+    await inventoryClient.query('DELETE FROM inventory_reservations');
 
-    await client.query(`
+    await inventoryClient.query(`
       UPDATE products
       SET reserved_quantity = 0
     `);
 
-    await client.query(productsSeed);
+    await inventoryClient.query(productsSeed);
 
-    await client.query(`
+    await inventoryClient.query(`
       INSERT INTO products (
         sku,
         name,
@@ -241,7 +268,7 @@ export default async function globalSetup(): Promise<void> {
         reserved_quantity = 0
     `);
 
-    await client.query(`
+    await inventoryClient.query(`
       INSERT INTO products (
         sku,
         name,
@@ -280,11 +307,23 @@ export default async function globalSetup(): Promise<void> {
         reserved_quantity = 0
     `);
 
-    await client.query('COMMIT');
+    await inventoryClient.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await inventoryClient.query('ROLLBACK').catch(() => undefined);
     throw error;
   } finally {
-    await client.end();
+    await inventoryClient.end();
+  }
+
+  const paymentClient = new Client({
+    connectionString: paymentConnectionString,
+  });
+
+  try {
+    await paymentClient.connect();
+    await paymentClient.query(paymentMigration);
+    await paymentClient.query('DELETE FROM payments');
+  } finally {
+    await paymentClient.end();
   }
 }
