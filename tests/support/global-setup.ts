@@ -43,7 +43,12 @@ export default async function globalSetup(): Promise<void> {
     'database',
   );
 
-  const [productsMigration, reservationsMigration, productsSeed] =
+  const [
+    productsMigration,
+    reservationsMigration,
+    reservationReleaseMigration,
+    productsSeed,
+  ] =
     await Promise.all([
       readFile(
         path.join(
@@ -58,6 +63,14 @@ export default async function globalSetup(): Promise<void> {
           databaseDirectory,
           'migrations',
           '002_create_inventory_reservations.sql',
+        ),
+        'utf8',
+      ),
+      readFile(
+        path.join(
+          databaseDirectory,
+          'migrations',
+          '003_add_reservation_release.sql',
         ),
         'utf8',
       ),
@@ -91,6 +104,7 @@ export default async function globalSetup(): Promise<void> {
 
     await inventoryClient.query(productsMigration);
     await inventoryClient.query(reservationsMigration);
+    await inventoryClient.query(reservationReleaseMigration);
 
     await inventoryClient.query('BEGIN');
 
@@ -127,6 +141,114 @@ export default async function globalSetup(): Promise<void> {
           'RESERVATION-INSUFFICIENT-001',
           'Reservation Insufficient Stock Test Product',
           2,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-IDEMP-001',
+          'Reservation Release Idempotency Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-ALREADY-001',
+          'Reservation Already Released Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-CONFLICT-A-001',
+          'Reservation Release Key Conflict First Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-CONFLICT-B-001',
+          'Reservation Release Key Conflict Second Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-CONCURRENT-SAME-KEY',
+          'Concurrent Reservation Release Same Key Test Product',
+          10,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-CONCURRENT-DIFFERENT-KEYS',
+          'Concurrent Reservation Release Different Keys Test Product',
+          10,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-DB-PERSISTENCE',
+          'Reservation Release Database Persistence Test Product',
+          10,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-DB-REPLAY',
+          'Reservation Release Database Replay Test Product',
+          10,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-DB-CONFLICT-A',
+          'Reservation Release Database Conflict First Product',
+          10,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-DB-CONFLICT-B',
+          'Reservation Release Database Conflict Second Product',
+          10,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-RESILIENCE-001',
+          'Reservation Release Database Resilience Test Product',
+          10,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-VALIDATION-HEADER-MISSING',
+          'Reservation Release Missing Header Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-VALIDATION-HEADER-BLANK',
+          'Reservation Release Blank Header Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-VALIDATION-OBJECT',
+          'Reservation Release Object Body Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-VALIDATION-ARRAY',
+          'Reservation Release Array Body Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-VALIDATION-MALFORMED',
+          'Reservation Release Malformed JSON Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-VALIDATION-TEXT',
+          'Reservation Release Text Body Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-VALIDATION-RAW',
+          'Reservation Release Raw Body Test Product',
+          5,
           0
         ),
         (

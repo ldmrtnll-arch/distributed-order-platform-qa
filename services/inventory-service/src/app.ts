@@ -8,7 +8,7 @@ import { reservationsRouter } from './routes/reservations.js';
 
 const malformedJsonErrorHandler: ErrorRequestHandler = (
   error,
-  _request,
+  request,
   response,
   next,
 ) => {
@@ -16,6 +16,18 @@ const malformedJsonErrorHandler: ErrorRequestHandler = (
     error instanceof SyntaxError &&
     Reflect.get(error, 'status') === 400
   ) {
+    if (/^\/reservations\/[^/]+\/release$/u.test(request.path)) {
+      response.status(400).json({
+        code: 'INVALID_RELEASE_REQUEST',
+        message: 'The reservation release request is invalid.',
+        details: {
+          field: 'body',
+          reason: 'must contain valid JSON.',
+        },
+      });
+      return;
+    }
+
     response.status(400).json({
       code: 'INVALID_RESERVATION_REQUEST',
       message: 'The reservation request is invalid.',
@@ -34,6 +46,16 @@ export function createApp(): Express {
   const app = express();
 
   app.disable('x-powered-by');
+  app.use(
+    '/reservations/:reservationId/release',
+    express.raw({
+      type: (request) =>
+        request.headers['content-type']
+          ?.split(';', 1)[0]
+          ?.trim()
+          .toLowerCase() !== 'application/json',
+    }),
+  );
   app.use(express.json());
   app.use(inventoryRouter);
   app.use(reservationsRouter);
