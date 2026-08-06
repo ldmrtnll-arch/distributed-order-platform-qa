@@ -101,6 +101,84 @@ export default async function globalSetup(): Promise<void> {
           'Reservation Insufficient Stock Test Product',
           2,
           0
+        ),
+        (
+          'RESERVATION-VALIDATION-HEADER-MISSING',
+          'Reservation Validation Header Missing Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-VALIDATION-HEADER-EMPTY',
+          'Reservation Validation Header Empty Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-VALIDATION-ORDER-MISSING',
+          'Reservation Validation Order Missing Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-VALIDATION-ORDER-INVALID',
+          'Reservation Validation Order Invalid Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-VALIDATION-SKU-MISSING',
+          'Reservation Validation SKU Missing Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-VALIDATION-SKU-EMPTY',
+          'Reservation Validation SKU Empty Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-VALIDATION-QUANTITY-MISSING',
+          'Reservation Validation Quantity Missing Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-VALIDATION-QUANTITY-ZERO',
+          'Reservation Validation Quantity Zero Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-VALIDATION-QUANTITY-NEGATIVE',
+          'Reservation Validation Quantity Negative Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-VALIDATION-QUANTITY-DECIMAL',
+          'Reservation Validation Quantity Decimal Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-VALIDATION-QUANTITY-STRING',
+          'Reservation Validation Quantity String Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-VALIDATION-QUANTITY-NULL',
+          'Reservation Validation Quantity Null Test Product',
+          3,
+          0
+        ),
+        (
+          'RESERVATION-VALIDATION-UNEXPECTED-FIELD',
+          'Reservation Validation Unexpected Field Test Product',
+          3,
+          0
         )
       ON CONFLICT (sku)
       DO UPDATE SET

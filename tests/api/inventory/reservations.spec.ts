@@ -19,6 +19,26 @@ interface ReservationResponse {
   createdAt: string;
 }
 
+interface ValidationTestCase {
+  name: string;
+  controlSku: string;
+  createHeaders: () => Record<string, string>;
+  createBody: () => Record<string, unknown>;
+  expectedBody:
+    | {
+        code: 'IDEMPOTENCY_KEY_REQUIRED';
+        message: 'The Idempotency-Key header is required.';
+      }
+    | {
+        code: 'INVALID_RESERVATION_REQUEST';
+        message: 'The reservation request is invalid.';
+        details: {
+          field: string;
+          reason: string;
+        };
+      };
+}
+
 const reservationResponseFields = [
   'createdAt',
   'orderId',
@@ -80,6 +100,220 @@ async function readReservation(
 
   return body;
 }
+
+async function expectInvalidReservationResponse(
+  response: APIResponse,
+  expectedBody: ValidationTestCase['expectedBody'],
+): Promise<void> {
+  expect(response.status()).toBe(400);
+  expect(response.headers()['content-type']).toMatch(
+    /^application\/json(?:;|$)/,
+  );
+  expect(response.headers()).not.toHaveProperty('x-powered-by');
+  expect(response.headers()).not.toHaveProperty('idempotent-replay');
+  await expect(response.json()).resolves.toEqual(expectedBody);
+}
+
+const validHeaders = (): Record<string, string> => ({
+  'Idempotency-Key': `reservation-${randomUUID()}`,
+  'X-Correlation-Id': `correlation-${randomUUID()}`,
+});
+
+const validationTestCases: ValidationTestCase[] = [
+  {
+    name: 'requires the Idempotency-Key header',
+    controlSku: 'RESERVATION-VALIDATION-HEADER-MISSING',
+    createHeaders: () => ({
+      'X-Correlation-Id': `correlation-${randomUUID()}`,
+    }),
+    createBody: () => ({
+      orderId: randomUUID(),
+      sku: 'RESERVATION-VALIDATION-HEADER-MISSING',
+      quantity: 1,
+    }),
+    expectedBody: {
+      code: 'IDEMPOTENCY_KEY_REQUIRED',
+      message: 'The Idempotency-Key header is required.',
+    },
+  },
+  {
+    name: 'rejects an Idempotency-Key containing only spaces',
+    controlSku: 'RESERVATION-VALIDATION-HEADER-EMPTY',
+    createHeaders: () => ({
+      'Idempotency-Key': '   ',
+      'X-Correlation-Id': `correlation-${randomUUID()}`,
+    }),
+    createBody: () => ({
+      orderId: randomUUID(),
+      sku: 'RESERVATION-VALIDATION-HEADER-EMPTY',
+      quantity: 1,
+    }),
+    expectedBody: {
+      code: 'IDEMPOTENCY_KEY_REQUIRED',
+      message: 'The Idempotency-Key header is required.',
+    },
+  },
+  {
+    name: 'rejects a request without orderId',
+    controlSku: 'RESERVATION-VALIDATION-ORDER-MISSING',
+    createHeaders: validHeaders,
+    createBody: () => ({
+      sku: 'RESERVATION-VALIDATION-ORDER-MISSING',
+      quantity: 1,
+    }),
+    expectedBody: {
+      code: 'INVALID_RESERVATION_REQUEST',
+      message: 'The reservation request is invalid.',
+      details: { field: 'orderId', reason: 'is required.' },
+    },
+  },
+  {
+    name: 'rejects an invalid orderId',
+    controlSku: 'RESERVATION-VALIDATION-ORDER-INVALID',
+    createHeaders: validHeaders,
+    createBody: () => ({
+      orderId: 'not-a-uuid',
+      sku: 'RESERVATION-VALIDATION-ORDER-INVALID',
+      quantity: 1,
+    }),
+    expectedBody: {
+      code: 'INVALID_RESERVATION_REQUEST',
+      message: 'The reservation request is invalid.',
+      details: { field: 'orderId', reason: 'must be a valid UUID.' },
+    },
+  },
+  {
+    name: 'rejects a request without sku',
+    controlSku: 'RESERVATION-VALIDATION-SKU-MISSING',
+    createHeaders: validHeaders,
+    createBody: () => ({ orderId: randomUUID(), quantity: 1 }),
+    expectedBody: {
+      code: 'INVALID_RESERVATION_REQUEST',
+      message: 'The reservation request is invalid.',
+      details: { field: 'sku', reason: 'is required.' },
+    },
+  },
+  {
+    name: 'rejects a sku containing only spaces',
+    controlSku: 'RESERVATION-VALIDATION-SKU-EMPTY',
+    createHeaders: validHeaders,
+    createBody: () => ({
+      orderId: randomUUID(),
+      sku: '   ',
+      quantity: 1,
+    }),
+    expectedBody: {
+      code: 'INVALID_RESERVATION_REQUEST',
+      message: 'The reservation request is invalid.',
+      details: { field: 'sku', reason: 'must be a non-empty string.' },
+    },
+  },
+  {
+    name: 'rejects a request without quantity',
+    controlSku: 'RESERVATION-VALIDATION-QUANTITY-MISSING',
+    createHeaders: validHeaders,
+    createBody: () => ({
+      orderId: randomUUID(),
+      sku: 'RESERVATION-VALIDATION-QUANTITY-MISSING',
+    }),
+    expectedBody: {
+      code: 'INVALID_RESERVATION_REQUEST',
+      message: 'The reservation request is invalid.',
+      details: { field: 'quantity', reason: 'is required.' },
+    },
+  },
+  {
+    name: 'rejects quantity equal to zero',
+    controlSku: 'RESERVATION-VALIDATION-QUANTITY-ZERO',
+    createHeaders: validHeaders,
+    createBody: () => ({
+      orderId: randomUUID(),
+      sku: 'RESERVATION-VALIDATION-QUANTITY-ZERO',
+      quantity: 0,
+    }),
+    expectedBody: {
+      code: 'INVALID_RESERVATION_REQUEST',
+      message: 'The reservation request is invalid.',
+      details: { field: 'quantity', reason: 'must be greater than zero.' },
+    },
+  },
+  {
+    name: 'rejects a negative quantity',
+    controlSku: 'RESERVATION-VALIDATION-QUANTITY-NEGATIVE',
+    createHeaders: validHeaders,
+    createBody: () => ({
+      orderId: randomUUID(),
+      sku: 'RESERVATION-VALIDATION-QUANTITY-NEGATIVE',
+      quantity: -1,
+    }),
+    expectedBody: {
+      code: 'INVALID_RESERVATION_REQUEST',
+      message: 'The reservation request is invalid.',
+      details: { field: 'quantity', reason: 'must be greater than zero.' },
+    },
+  },
+  {
+    name: 'rejects a decimal quantity',
+    controlSku: 'RESERVATION-VALIDATION-QUANTITY-DECIMAL',
+    createHeaders: validHeaders,
+    createBody: () => ({
+      orderId: randomUUID(),
+      sku: 'RESERVATION-VALIDATION-QUANTITY-DECIMAL',
+      quantity: 1.5,
+    }),
+    expectedBody: {
+      code: 'INVALID_RESERVATION_REQUEST',
+      message: 'The reservation request is invalid.',
+      details: { field: 'quantity', reason: 'must be an integer.' },
+    },
+  },
+  {
+    name: 'rejects quantity sent as a string',
+    controlSku: 'RESERVATION-VALIDATION-QUANTITY-STRING',
+    createHeaders: validHeaders,
+    createBody: () => ({
+      orderId: randomUUID(),
+      sku: 'RESERVATION-VALIDATION-QUANTITY-STRING',
+      quantity: '1',
+    }),
+    expectedBody: {
+      code: 'INVALID_RESERVATION_REQUEST',
+      message: 'The reservation request is invalid.',
+      details: { field: 'quantity', reason: 'must be a finite number.' },
+    },
+  },
+  {
+    name: 'rejects quantity equal to null',
+    controlSku: 'RESERVATION-VALIDATION-QUANTITY-NULL',
+    createHeaders: validHeaders,
+    createBody: () => ({
+      orderId: randomUUID(),
+      sku: 'RESERVATION-VALIDATION-QUANTITY-NULL',
+      quantity: null,
+    }),
+    expectedBody: {
+      code: 'INVALID_RESERVATION_REQUEST',
+      message: 'The reservation request is invalid.',
+      details: { field: 'quantity', reason: 'must be a finite number.' },
+    },
+  },
+  {
+    name: 'rejects an unexpected request field',
+    controlSku: 'RESERVATION-VALIDATION-UNEXPECTED-FIELD',
+    createHeaders: validHeaders,
+    createBody: () => ({
+      orderId: randomUUID(),
+      sku: 'RESERVATION-VALIDATION-UNEXPECTED-FIELD',
+      quantity: 1,
+      unexpectedField: true,
+    }),
+    expectedBody: {
+      code: 'INVALID_RESERVATION_REQUEST',
+      message: 'The reservation request is invalid.',
+      details: { field: 'unexpectedField', reason: 'is not allowed.' },
+    },
+  },
+];
 
 test.describe('POST /reservations', () => {
   test('creates a reservation and replays the same request idempotently', async ({
@@ -399,4 +633,46 @@ test.describe('POST /reservations', () => {
       availableQuantity: 2,
     });
   });
+
+  for (const validationCase of validationTestCases) {
+    test(validationCase.name, async ({ request }) => {
+      const inventoryBeforeResponse = await request.get(
+        `/inventory/${validationCase.controlSku}`,
+      );
+      const inventoryBefore = await readInventoryItem(
+        inventoryBeforeResponse,
+      );
+
+      expect(inventoryBefore).toMatchObject({
+        sku: validationCase.controlSku,
+        totalQuantity: 3,
+        reservedQuantity: 0,
+        availableQuantity: 3,
+      });
+
+      const response = await request.post('/reservations', {
+        headers: validationCase.createHeaders(),
+        data: validationCase.createBody(),
+      });
+
+      await expectInvalidReservationResponse(
+        response,
+        validationCase.expectedBody,
+      );
+
+      const inventoryAfterResponse = await request.get(
+        `/inventory/${validationCase.controlSku}`,
+      );
+      const inventoryAfter = await readInventoryItem(
+        inventoryAfterResponse,
+      );
+
+      expect(inventoryAfter).toMatchObject({
+        sku: validationCase.controlSku,
+        totalQuantity: 3,
+        reservedQuantity: 0,
+        availableQuantity: 3,
+      });
+    });
+  }
 });
