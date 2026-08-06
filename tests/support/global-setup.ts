@@ -168,6 +168,48 @@ export default async function globalSetup(): Promise<void> {
           0
         ),
         (
+          'RESERVATION-RELEASE-VALIDATION-HEADER-MISSING',
+          'Reservation Release Missing Header Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-VALIDATION-HEADER-BLANK',
+          'Reservation Release Blank Header Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-VALIDATION-OBJECT',
+          'Reservation Release Object Body Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-VALIDATION-ARRAY',
+          'Reservation Release Array Body Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-VALIDATION-MALFORMED',
+          'Reservation Release Malformed JSON Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-VALIDATION-TEXT',
+          'Reservation Release Text Body Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-RELEASE-VALIDATION-RAW',
+          'Reservation Release Raw Body Test Product',
+          5,
+          0
+        ),
+        (
           'RESERVATION-VALIDATION-HEADER-MISSING',
           'Reservation Validation Header Missing Test Product',
           3,

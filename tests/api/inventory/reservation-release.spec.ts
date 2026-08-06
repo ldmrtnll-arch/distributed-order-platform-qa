@@ -198,6 +198,60 @@ async function expectReleaseConflict(
   );
 }
 
+async function expectReservedInventory(
+  request: APIRequestContext,
+  productSku: string,
+  productName: string,
+): Promise<void> {
+  expect(
+    await readInventoryItem(await request.get(`/inventory/${productSku}`)),
+  ).toEqual({
+    sku: productSku,
+    name: productName,
+    totalQuantity: 5,
+    reservedQuantity: 2,
+    availableQuantity: 3,
+  });
+}
+
+async function expectPublicReleaseError(
+  response: APIResponse,
+  expectedStatus: number,
+  expectedBody: unknown,
+  sensitiveValues: string[] = [],
+): Promise<void> {
+  expect(response.status()).toBe(expectedStatus);
+  expect(response.headers()['content-type']).toMatch(
+    /^application\/json(?:;|$)/,
+  );
+  expect(response.headers()).not.toHaveProperty('x-powered-by');
+  expect(response.headers()).not.toHaveProperty('idempotent-replay');
+
+  const body = (await response.json()) as unknown;
+  expect(body).toEqual(expectedBody);
+
+  const serializedBody = JSON.stringify(body);
+  for (const sensitiveValue of sensitiveValues) {
+    expect(serializedBody).not.toContain(sensitiveValue);
+  }
+  expect(serializedBody).not.toMatch(
+    /fingerprint|paymentToken|password|postgres(?:ql)?:\/\/[^\s"]+@|connectionstring|stack|\.env|\bselect\b|\binsert\b|\bupdate\b|\bdelete\b|[a-z]:\\|\/services\/|node_modules/i,
+  );
+}
+
+const requiredIdempotencyKeyError = {
+  code: 'IDEMPOTENCY_KEY_REQUIRED',
+  message: 'The Idempotency-Key header is required.',
+};
+
+function invalidReleaseBody(reason: string): unknown {
+  return {
+    code: 'INVALID_RELEASE_REQUEST',
+    message: 'The reservation release request is invalid.',
+    details: { field: 'body', reason },
+  };
+}
+
 test.describe('POST /reservations/:reservationId/release', () => {
   test('releases a reservation and replays the release idempotently', async ({
     request,
@@ -486,5 +540,210 @@ test.describe('POST /reservations/:reservationId/release', () => {
       reservedQuantity: 2,
       availableQuantity: 3,
     });
+  });
+
+  test.describe('request validation', () => {
+    test('rejects an invalid reservationId', async ({ request }) => {
+      const idempotencyKey = `reservation-release-${randomUUID()}`;
+      const response = await postRelease(
+        request,
+        'not-a-valid-uuid',
+        idempotencyKey,
+      );
+
+      await expectPublicReleaseError(
+        response,
+        400,
+        {
+          code: 'INVALID_RESERVATION_ID',
+          message:
+            'The reservationId path parameter must be a valid UUID.',
+        },
+        [idempotencyKey],
+      );
+    });
+
+    test('returns not found for an unknown reservationId', async ({
+      request,
+    }) => {
+      const reservationId = randomUUID();
+      const idempotencyKey = `reservation-release-${randomUUID()}`;
+      const response = await postRelease(
+        request,
+        reservationId,
+        idempotencyKey,
+      );
+
+      await expectPublicReleaseError(
+        response,
+        404,
+        {
+          code: 'INVENTORY_RESERVATION_NOT_FOUND',
+          message: 'Inventory reservation was not found.',
+        },
+        [reservationId, idempotencyKey],
+      );
+    });
+
+    test('requires the Idempotency-Key header', async ({ request }) => {
+      const productSku = 'RESERVATION-RELEASE-VALIDATION-HEADER-MISSING';
+      const productName = 'Reservation Release Missing Header Test Product';
+      const reservation = await createReservedReservation(
+        request,
+        productSku,
+        2,
+      );
+      await expectReservedInventory(request, productSku, productName);
+
+      const response = await request.post(
+        `/reservations/${reservation.reservationId}/release`,
+        {
+          headers: {
+            'X-Correlation-Id': `correlation-${randomUUID()}`,
+          },
+        },
+      );
+      await expectPublicReleaseError(response, 400, requiredIdempotencyKeyError, [
+        reservation.reservationId,
+      ]);
+      await expectReservedInventory(request, productSku, productName);
+    });
+
+    test('rejects an Idempotency-Key containing only spaces', async ({
+      request,
+    }) => {
+      const productSku = 'RESERVATION-RELEASE-VALIDATION-HEADER-BLANK';
+      const productName = 'Reservation Release Blank Header Test Product';
+      const reservation = await createReservedReservation(
+        request,
+        productSku,
+        2,
+      );
+      await expectReservedInventory(request, productSku, productName);
+
+      const response = await request.post(
+        `/reservations/${reservation.reservationId}/release`,
+        {
+          headers: {
+            'Idempotency-Key': '   ',
+            'X-Correlation-Id': `correlation-${randomUUID()}`,
+          },
+        },
+      );
+      await expectPublicReleaseError(response, 400, requiredIdempotencyKeyError, [
+        reservation.reservationId,
+      ]);
+      await expectReservedInventory(request, productSku, productName);
+    });
+
+    const bodyCases: Array<{
+      name: string;
+      sku: string;
+      productName: string;
+      data: unknown;
+      headers?: Record<string, string>;
+      reason: string;
+      sensitiveValues?: string[];
+    }> = [
+      {
+        name: 'rejects an empty JSON object request body',
+        sku: 'RESERVATION-RELEASE-VALIDATION-OBJECT',
+        productName: 'Reservation Release Object Body Test Product',
+        data: {},
+        reason: 'must be empty.',
+      },
+      {
+        name: 'rejects a JSON array request body',
+        sku: 'RESERVATION-RELEASE-VALIDATION-ARRAY',
+        productName: 'Reservation Release Array Body Test Product',
+        data: [],
+        reason: 'must be empty.',
+      },
+      {
+        name: 'rejects malformed JSON without exposing parser details',
+        sku: 'RESERVATION-RELEASE-VALIDATION-MALFORMED',
+        productName: 'Reservation Release Malformed JSON Test Product',
+        data: '{"unexpected":',
+        headers: { 'Content-Type': 'application/json' },
+        reason: 'must contain valid JSON.',
+        sensitiveValues: ['{"unexpected":', 'SyntaxError', 'Unexpected token'],
+      },
+      {
+        name: 'rejects a raw body with a text/plain Content-Type',
+        sku: 'RESERVATION-RELEASE-VALIDATION-TEXT',
+        productName: 'Reservation Release Text Body Test Product',
+        data: 'unexpected release body',
+        headers: { 'Content-Type': 'text/plain' },
+        reason: 'must be empty.',
+        sensitiveValues: ['unexpected release body'],
+      },
+      {
+        name: 'rejects a raw body without an application/json Content-Type',
+        sku: 'RESERVATION-RELEASE-VALIDATION-RAW',
+        productName: 'Reservation Release Raw Body Test Product',
+        data: 'unexpected release body',
+        reason: 'must be empty.',
+        sensitiveValues: ['unexpected release body'],
+      },
+    ];
+
+    for (const bodyCase of bodyCases) {
+      test(bodyCase.name, async ({ request }) => {
+        const reservation = await createReservedReservation(
+          request,
+          bodyCase.sku,
+          2,
+        );
+        await expectReservedInventory(
+          request,
+          bodyCase.sku,
+          bodyCase.productName,
+        );
+        const idempotencyKey = `reservation-release-${randomUUID()}`;
+        const response = await request.post(
+          `/reservations/${reservation.reservationId}/release`,
+          {
+            headers: {
+              'Idempotency-Key': idempotencyKey,
+              'X-Correlation-Id': `correlation-${randomUUID()}`,
+              ...bodyCase.headers,
+            },
+            data: bodyCase.data,
+          },
+        );
+        const inventoryAfterResponse = await readInventoryItem(
+          await request.get(`/inventory/${bodyCase.sku}`),
+        );
+
+        if (response.status() !== 400) {
+          console.log(
+            JSON.stringify({
+              validationBug: bodyCase.name,
+              observedStatus: response.status(),
+              observedBody: await response.json(),
+              inventoryAfterResponse,
+            }),
+          );
+        }
+
+        await expectPublicReleaseError(
+          response,
+          400,
+          invalidReleaseBody(bodyCase.reason),
+          [
+            reservation.reservationId,
+            idempotencyKey,
+            ...(bodyCase.sensitiveValues ?? []),
+          ],
+        );
+        expect(inventoryAfterResponse).toEqual({
+          sku: bodyCase.sku,
+          name: bodyCase.productName,
+          totalQuantity: 5,
+          reservedQuantity: 2,
+          availableQuantity: 3,
+        });
+      });
+    }
   });
 });
