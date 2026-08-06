@@ -209,6 +209,24 @@ export default async function globalSetup(): Promise<void> {
           'Reservation Invalid Content Type Test Product',
           3,
           0
+        ),
+        (
+          'RESERVATION-DB-CREATE-001',
+          'Reservation Database Creation Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-DB-IDEMP-001',
+          'Reservation Database Idempotency Test Product',
+          5,
+          0
+        ),
+        (
+          'RESERVATION-DB-FAILURE-001',
+          'Reservation Database Failure Test Product',
+          2,
+          0
         )
       ON CONFLICT (sku)
       DO UPDATE SET
