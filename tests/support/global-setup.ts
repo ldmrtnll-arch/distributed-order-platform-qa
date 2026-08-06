@@ -227,6 +227,12 @@ export default async function globalSetup(): Promise<void> {
           'Reservation Database Failure Test Product',
           2,
           0
+        ),
+        (
+          'RESERVATION-RESILIENCE-001',
+          'Reservation Database Resilience Test Product',
+          5,
+          0
         )
       ON CONFLICT (sku)
       DO UPDATE SET

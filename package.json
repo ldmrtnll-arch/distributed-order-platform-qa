@@ -13,6 +13,7 @@
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "playwright test --config tests/playwright.config.ts",
+    "test:resilience:inventory": "playwright test --config tests/playwright.resilience.config.ts",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down --remove-orphans",
     "docker:logs": "docker compose logs -f"
