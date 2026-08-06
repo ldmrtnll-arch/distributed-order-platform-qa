@@ -13,7 +13,7 @@ process.env.no_proxy = [process.env.no_proxy, localAddresses]
   .join(',');
 
 export default defineConfig({
-  testDir: './resilience',
+  testDir: './resilience/inventory',
   workers: 1,
   fullyParallel: false,
   forbidOnly: true,

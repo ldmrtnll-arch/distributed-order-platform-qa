@@ -27,12 +27,22 @@ export async function startPostgres(): Promise<void> {
 }
 
 export async function getPostgresStatus(): Promise<ComposeServiceStatus> {
+  return getComposeServiceStatus('postgres');
+}
+
+export async function getRabbitMqStatus(): Promise<ComposeServiceStatus> {
+  return getComposeServiceStatus('rabbitmq');
+}
+
+async function getComposeServiceStatus(
+  service: string,
+): Promise<ComposeServiceStatus> {
   const output = await runDockerCompose([
     'ps',
     '--all',
     '--format',
     'json',
-    'postgres',
+    service,
   ]);
   const trimmedOutput = output.trim();
 
@@ -44,7 +54,7 @@ export async function getPostgresStatus(): Promise<ComposeServiceStatus> {
   const status = Array.isArray(parsed) ? parsed[0] : parsed;
 
   if (typeof status !== 'object' || status === null) {
-    throw new Error('Docker Compose returned an invalid postgres status.');
+    throw new Error(`Docker Compose returned an invalid ${service} status.`);
   }
 
   return {
