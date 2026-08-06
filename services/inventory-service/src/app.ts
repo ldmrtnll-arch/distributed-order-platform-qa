@@ -46,6 +46,16 @@ export function createApp(): Express {
   const app = express();
 
   app.disable('x-powered-by');
+  app.use(
+    '/reservations/:reservationId/release',
+    express.raw({
+      type: (request) =>
+        request.headers['content-type']
+          ?.split(';', 1)[0]
+          ?.trim()
+          .toLowerCase() !== 'application/json',
+    }),
+  );
   app.use(express.json());
   app.use(inventoryRouter);
   app.use(reservationsRouter);

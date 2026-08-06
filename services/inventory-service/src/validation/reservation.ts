@@ -22,7 +22,7 @@ export function isValidReservationId(value: string): boolean {
 }
 
 export function isEmptyReleaseRequest(body: unknown): boolean {
-  return body === undefined;
+  return body === undefined || (Buffer.isBuffer(body) && body.length === 0);
 }
 
 function invalid(field: string, reason: string): ReservationValidationResult {
