@@ -27,7 +27,7 @@ export default defineConfig({
   },
   webServer: {
     command:
-      'node node_modules/tsx/dist/cli.mjs services/inventory-service/src/server.ts',
+      'node --import tsx services/inventory-service/src/server.ts',
     cwd: repositoryRoot,
     port: 3002,
     reuseExistingServer: false,
