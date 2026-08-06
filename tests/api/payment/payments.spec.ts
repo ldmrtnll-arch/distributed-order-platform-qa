@@ -144,6 +144,31 @@ async function expectPaymentRequestError(
   );
 }
 
+async function expectSafePayloadError(
+  response: APIResponse,
+  reason: string,
+  sensitiveValues: string[] = ['tok_approved'],
+): Promise<void> {
+  await expectPaymentRequestError(
+    response,
+    {
+      code: 'INVALID_PAYMENT_REQUEST',
+      message: 'The payment request is invalid.',
+      details: {
+        field: 'body',
+        reason,
+      },
+    },
+    sensitiveValues,
+  );
+
+  const responseText = await response.text();
+
+  expect(responseText).not.toMatch(
+    /SyntaxError|Unexpected token|JSON at position|node_modules|services[\\/]|[A-Z]:\\/i,
+  );
+}
+
 test.describe('POST /payments', () => {
   test('creates an approved payment and replays the same request idempotently', async ({
     request,
@@ -610,5 +635,113 @@ test.describe('POST /payments', () => {
         );
       });
     }
+  });
+
+  test.describe('payload validation', () => {
+    test('rejects a completely missing request body', async ({ request }) => {
+      const response = await request.post(
+        'http://127.0.0.1:3003/payments',
+        {
+          headers: {
+            'Idempotency-Key': `payment-${randomUUID()}`,
+            'X-Correlation-Id': `correlation-${randomUUID()}`,
+          },
+        },
+      );
+
+      await expectSafePayloadError(response, 'must be a JSON object.');
+    });
+
+    test('rejects a JSON array request body', async ({ request }) => {
+      const response = await request.post(
+        'http://127.0.0.1:3003/payments',
+        {
+          headers: {
+            'Idempotency-Key': `payment-${randomUUID()}`,
+            'X-Correlation-Id': `correlation-${randomUUID()}`,
+          },
+          data: [
+            {
+              orderId: randomUUID(),
+              amountInCents: 15990,
+              currency: 'BRL',
+              paymentToken: 'tok_approved',
+            },
+          ],
+        },
+      );
+
+      await expectSafePayloadError(response, 'must be a JSON object.');
+    });
+
+    test('rejects malformed JSON without exposing parser details', async ({
+      request,
+    }) => {
+      const malformedBody = '{"orderId":';
+      const response = await request.post(
+        'http://127.0.0.1:3003/payments',
+        {
+          headers: {
+            'Idempotency-Key': `payment-${randomUUID()}`,
+            'X-Correlation-Id': `correlation-${randomUUID()}`,
+            'Content-Type': 'application/json',
+          },
+          data: malformedBody,
+        },
+      );
+
+      await expectSafePayloadError(
+        response,
+        'must contain valid JSON.',
+        ['tok_approved', malformedBody],
+      );
+    });
+
+    test('rejects a raw JSON body without an application/json Content-Type', async ({
+      request,
+    }) => {
+      const rawBody = JSON.stringify({
+        orderId: randomUUID(),
+        amountInCents: 15990,
+        currency: 'BRL',
+        paymentToken: 'tok_approved',
+      });
+      const response = await request.post(
+        'http://127.0.0.1:3003/payments',
+        {
+          headers: {
+            'Idempotency-Key': `payment-${randomUUID()}`,
+            'X-Correlation-Id': `correlation-${randomUUID()}`,
+          },
+          data: rawBody,
+        },
+      );
+
+      await expectSafePayloadError(response, 'must be a JSON object.');
+    });
+
+    test('rejects a raw JSON body with a text/plain Content-Type', async ({
+      request,
+    }) => {
+      const rawBody = JSON.stringify({
+        orderId: randomUUID(),
+        amountInCents: 15990,
+        currency: 'BRL',
+        paymentToken: 'tok_approved',
+      });
+      const response = await request.post(
+        'http://127.0.0.1:3003/payments',
+        {
+          headers: {
+            'Idempotency-Key': `payment-${randomUUID()}`,
+            'X-Correlation-Id': `correlation-${randomUUID()}`,
+            'Content-Type': 'text/plain',
+          },
+          data: rawBody,
+        },
+      );
+
+      await expectSafePayloadError(response, 'must be a JSON object.');
+    });
   });
 });
