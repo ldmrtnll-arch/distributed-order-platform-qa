@@ -445,6 +445,93 @@ test.describe('POST /payments', () => {
     ]);
   });
 
+  test('creates only one payment for concurrent requests with the same idempotency key', async ({
+    request,
+  }) => {
+    const orderId = randomUUID();
+    const idempotencyKey = `payment-${randomUUID()}`;
+    const firstCorrelationId = `correlation-${randomUUID()}`;
+    const secondCorrelationId = `correlation-${randomUUID()}`;
+    const requestBody = {
+      orderId,
+      amountInCents: 23990,
+      currency: ' brl ',
+      paymentToken: 'tok_approved',
+    };
+
+    const [firstResponse, secondResponse] = await Promise.all([
+      request.post('http://127.0.0.1:3003/payments', {
+        headers: {
+          'Idempotency-Key': idempotencyKey,
+          'X-Correlation-Id': firstCorrelationId,
+        },
+        data: requestBody,
+      }),
+      request.post('http://127.0.0.1:3003/payments', {
+        headers: {
+          'Idempotency-Key': idempotencyKey,
+          'X-Correlation-Id': secondCorrelationId,
+        },
+        data: requestBody,
+      }),
+    ]);
+
+    const responses = [firstResponse, secondResponse];
+    const sortedStatuses = responses
+      .map((response) => response.status())
+      .sort((left, right) => left - right);
+
+    expect(firstCorrelationId).not.toBe(secondCorrelationId);
+    expect(sortedStatuses).toEqual([200, 201]);
+
+    const creationResponse = responses.find(
+      (response) => response.status() === 201,
+    );
+    const replayResponse = responses.find(
+      (response) => response.status() === 200,
+    );
+
+    if (creationResponse === undefined || replayResponse === undefined) {
+      throw new Error('Expected one created response and one replay response.');
+    }
+
+    expect(creationResponse.headers()).not.toHaveProperty(
+      'idempotent-replay',
+    );
+    const createdPayment = await readApprovedPayment(
+      creationResponse,
+      201,
+    );
+
+    expect(createdPayment).toEqual({
+      paymentId: createdPayment.paymentId,
+      orderId,
+      amountInCents: 23990,
+      currency: 'BRL',
+      status: 'APPROVED',
+      createdAt: createdPayment.createdAt,
+    });
+    expectSafePaymentBody(createdPayment);
+
+    expect(replayResponse.headers()['idempotent-replay']).toBe('true');
+    const replayedPayment = await readApprovedPayment(replayResponse, 200);
+
+    expect(replayedPayment).toEqual(createdPayment);
+    expect(replayedPayment.paymentId).toBe(createdPayment.paymentId);
+    expect(replayedPayment.createdAt).toBe(createdPayment.createdAt);
+    expect(replayedPayment.status).toBe('APPROVED');
+    expectSafePaymentBody(replayedPayment);
+
+    const serializedResponses = JSON.stringify([
+      createdPayment,
+      replayedPayment,
+    ]);
+
+    expect(serializedResponses).not.toMatch(
+      /node_modules|services[\\/]|[A-Z]:\\/i,
+    );
+  });
+
   test.describe('request validation', () => {
     const idempotencyHeaderCases = [
       {
