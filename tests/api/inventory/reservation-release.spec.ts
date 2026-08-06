@@ -542,6 +542,243 @@ test.describe('POST /reservations/:reservationId/release', () => {
     });
   });
 
+  test.describe('concurrent releases', () => {
+    test('releases a reservation exactly once when concurrent requests use the same key', async ({
+      request,
+    }) => {
+      const productSku = 'RESERVATION-RELEASE-CONCURRENT-SAME-KEY';
+      const productName =
+        'Concurrent Reservation Release Same Key Test Product';
+      expect(
+        await readInventoryItem(await request.get(`/inventory/${productSku}`)),
+      ).toEqual({
+        sku: productSku,
+        name: productName,
+        totalQuantity: 10,
+        reservedQuantity: 0,
+        availableQuantity: 10,
+      });
+
+      const reservation = await createReservedReservation(
+        request,
+        productSku,
+        4,
+      );
+      expect(
+        await readInventoryItem(await request.get(`/inventory/${productSku}`)),
+      ).toEqual({
+        sku: productSku,
+        name: productName,
+        totalQuantity: 10,
+        reservedQuantity: 4,
+        availableQuantity: 6,
+      });
+
+      const releaseKey = `reservation-release-${randomUUID()}`;
+      const responses = await Promise.all([
+        postRelease(request, reservation.reservationId, releaseKey),
+        postRelease(request, reservation.reservationId, releaseKey),
+      ]);
+
+      expect(responses.map((response) => response.status()).sort()).toEqual([
+        200,
+        200,
+      ]);
+      expect(
+        responses.filter(
+          (response) => response.headers()['idempotent-replay'] === 'true',
+        ),
+      ).toHaveLength(1);
+      expect(
+        responses.filter(
+          (response) => response.headers()['idempotent-replay'] === undefined,
+        ),
+      ).toHaveLength(1);
+
+      const releasedReservations = await Promise.all(
+        responses.map((response) => readReleasedReservation(response)),
+      );
+      expect(releasedReservations[0]).toEqual(releasedReservations[1]);
+      for (const releasedReservation of releasedReservations) {
+        expect(releasedReservation).toEqual({
+          reservationId: reservation.reservationId,
+          orderId: reservation.orderId,
+          sku: productSku,
+          quantity: 4,
+          status: 'RELEASED',
+          releasedAt: releasedReservations[0]?.releasedAt,
+        });
+        expectSafeReleaseBody(releasedReservation, releaseKey);
+      }
+
+      expect(
+        await readInventoryItem(await request.get(`/inventory/${productSku}`)),
+      ).toEqual({
+        sku: productSku,
+        name: productName,
+        totalQuantity: 10,
+        reservedQuantity: 0,
+        availableQuantity: 10,
+      });
+
+      const replayResponse = await postRelease(
+        request,
+        reservation.reservationId,
+        releaseKey,
+      );
+      expect(replayResponse.headers()['idempotent-replay']).toBe('true');
+      expect(await readReleasedReservation(replayResponse)).toEqual(
+        releasedReservations[0],
+      );
+      expect(
+        await readInventoryItem(await request.get(`/inventory/${productSku}`)),
+      ).toEqual({
+        sku: productSku,
+        name: productName,
+        totalQuantity: 10,
+        reservedQuantity: 0,
+        availableQuantity: 10,
+      });
+    });
+
+    test('allows only one release when concurrent requests use different keys', async ({
+      request,
+    }) => {
+      const productSku = 'RESERVATION-RELEASE-CONCURRENT-DIFFERENT-KEYS';
+      const productName =
+        'Concurrent Reservation Release Different Keys Test Product';
+      expect(
+        await readInventoryItem(await request.get(`/inventory/${productSku}`)),
+      ).toEqual({
+        sku: productSku,
+        name: productName,
+        totalQuantity: 10,
+        reservedQuantity: 0,
+        availableQuantity: 10,
+      });
+
+      const reservation = await createReservedReservation(
+        request,
+        productSku,
+        3,
+      );
+      expect(
+        await readInventoryItem(await request.get(`/inventory/${productSku}`)),
+      ).toEqual({
+        sku: productSku,
+        name: productName,
+        totalQuantity: 10,
+        reservedQuantity: 3,
+        availableQuantity: 7,
+      });
+
+      const releaseKeyA = `reservation-release-${randomUUID()}`;
+      const releaseKeyB = `reservation-release-${randomUUID()}`;
+      const concurrentResults = await Promise.all([
+        postRelease(request, reservation.reservationId, releaseKeyA).then(
+          (response) => ({ key: releaseKeyA, response }),
+        ),
+        postRelease(request, reservation.reservationId, releaseKeyB).then(
+          (response) => ({ key: releaseKeyB, response }),
+        ),
+      ]);
+
+      expect(
+        concurrentResults
+          .map(({ response }) => response.status())
+          .sort((left, right) => left - right),
+      ).toEqual([200, 409]);
+      const winningResult = concurrentResults.find(
+        ({ response }) => response.status() === 200,
+      );
+      const losingResult = concurrentResults.find(
+        ({ response }) => response.status() === 409,
+      );
+      expect(winningResult).toBeDefined();
+      expect(losingResult).toBeDefined();
+      if (winningResult === undefined || losingResult === undefined) {
+        throw new Error('Expected one successful and one conflicting release.');
+      }
+
+      expect(winningResult.response.headers()).not.toHaveProperty(
+        'idempotent-replay',
+      );
+      const winningRelease = await readReleasedReservation(
+        winningResult.response,
+      );
+      expect(winningRelease).toEqual({
+        reservationId: reservation.reservationId,
+        orderId: reservation.orderId,
+        sku: productSku,
+        quantity: 3,
+        status: 'RELEASED',
+        releasedAt: winningRelease.releasedAt,
+      });
+      expectSafeReleaseBody(winningRelease, winningResult.key);
+      expectSafeReleaseBody(winningRelease, losingResult.key);
+      await expectReleaseConflict(
+        losingResult.response,
+        {
+          code: 'RESERVATION_ALREADY_RELEASED',
+          message: 'The inventory reservation has already been released.',
+        },
+        [
+          reservation.reservationId,
+          winningResult.key,
+          losingResult.key,
+        ],
+      );
+
+      expect(
+        await readInventoryItem(await request.get(`/inventory/${productSku}`)),
+      ).toEqual({
+        sku: productSku,
+        name: productName,
+        totalQuantity: 10,
+        reservedQuantity: 0,
+        availableQuantity: 10,
+      });
+
+      const winningReplayResponse = await postRelease(
+        request,
+        reservation.reservationId,
+        winningResult.key,
+      );
+      expect(winningReplayResponse.headers()['idempotent-replay']).toBe('true');
+      expect(await readReleasedReservation(winningReplayResponse)).toEqual(
+        winningRelease,
+      );
+
+      const losingRetryResponse = await postRelease(
+        request,
+        reservation.reservationId,
+        losingResult.key,
+      );
+      await expectReleaseConflict(
+        losingRetryResponse,
+        {
+          code: 'RESERVATION_ALREADY_RELEASED',
+          message: 'The inventory reservation has already been released.',
+        },
+        [
+          reservation.reservationId,
+          winningResult.key,
+          losingResult.key,
+        ],
+      );
+
+      expect(
+        await readInventoryItem(await request.get(`/inventory/${productSku}`)),
+      ).toEqual({
+        sku: productSku,
+        name: productName,
+        totalQuantity: 10,
+        reservedQuantity: 0,
+        availableQuantity: 10,
+      });
+    });
+  });
+
   test.describe('request validation', () => {
     test('rejects an invalid reservationId', async ({ request }) => {
       const idempotencyKey = `reservation-release-${randomUUID()}`;
