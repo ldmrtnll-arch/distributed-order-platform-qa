@@ -106,6 +106,44 @@ function expectSafePaymentBody(
   );
 }
 
+interface PaymentRequestError {
+  code: 'IDEMPOTENCY_KEY_REQUIRED' | 'INVALID_PAYMENT_REQUEST';
+  message: string;
+  details?: {
+    field: string;
+    reason: string;
+  };
+}
+
+async function expectPaymentRequestError(
+  response: APIResponse,
+  expectedBody: PaymentRequestError,
+  sensitiveValues: string[] = ['tok_approved'],
+): Promise<void> {
+  expect(response.status()).toBe(400);
+  expect(response.headers()['content-type']).toMatch(
+    /^application\/json(?:;|$)/,
+  );
+  expect(response.headers()).not.toHaveProperty('x-powered-by');
+  expect(response.headers()).not.toHaveProperty('idempotent-replay');
+
+  const body = (await response.json()) as unknown;
+
+  expect(body).toEqual(expectedBody);
+  expect(body).not.toHaveProperty('paymentId');
+  expect(body).not.toHaveProperty('createdAt');
+  expect(body).not.toHaveProperty('paymentToken');
+
+  const serializedBody = JSON.stringify(body);
+
+  for (const sensitiveValue of sensitiveValues) {
+    expect(serializedBody).not.toContain(sensitiveValue);
+  }
+  expect(serializedBody).not.toMatch(
+    /password|postgres(?:ql)?:\/\/[^\s"]+@|connectionstring|stack|\bselect\b|\binsert\b|\bupdate\b|\bdelete\b/i,
+  );
+}
+
 test.describe('POST /payments', () => {
   test('creates an approved payment and replays the same request idempotently', async ({
     request,
@@ -380,5 +418,197 @@ test.describe('POST /payments', () => {
       'tok_approved',
       'tok_declined',
     ]);
+  });
+
+  test.describe('request validation', () => {
+    const idempotencyHeaderCases = [
+      {
+        name: 'requires the Idempotency-Key header',
+        headers: {},
+      },
+      {
+        name: 'rejects an Idempotency-Key containing only spaces',
+        headers: { 'Idempotency-Key': '   ' },
+      },
+    ];
+
+    for (const idempotencyHeaderCase of idempotencyHeaderCases) {
+      test(idempotencyHeaderCase.name, async ({ request }) => {
+        const response = await request.post(
+          'http://127.0.0.1:3003/payments',
+          {
+            headers: {
+              ...idempotencyHeaderCase.headers,
+              'X-Correlation-Id': `correlation-${randomUUID()}`,
+            },
+            data: {
+              orderId: randomUUID(),
+              amountInCents: 15990,
+              currency: 'BRL',
+              paymentToken: 'tok_approved',
+            },
+          },
+        );
+
+        await expectPaymentRequestError(response, {
+          code: 'IDEMPOTENCY_KEY_REQUIRED',
+          message: 'The Idempotency-Key header is required.',
+        });
+      });
+    }
+
+    const bodyValidationCases: Array<{
+      name: string;
+      field: string;
+      reason: string;
+      changeBody: (body: Record<string, unknown>) => void;
+      sensitiveValues?: string[];
+    }> = [
+      {
+        name: 'rejects a request without orderId',
+        field: 'orderId',
+        reason: 'is required.',
+        changeBody: (body) => delete body.orderId,
+      },
+      {
+        name: 'rejects an invalid orderId',
+        field: 'orderId',
+        reason: 'must be a valid UUID.',
+        changeBody: (body) => {
+          body.orderId = 'not-a-uuid';
+        },
+      },
+      {
+        name: 'rejects a request without amountInCents',
+        field: 'amountInCents',
+        reason: 'is required.',
+        changeBody: (body) => delete body.amountInCents,
+      },
+      {
+        name: 'rejects amountInCents equal to zero',
+        field: 'amountInCents',
+        reason: 'must be greater than zero.',
+        changeBody: (body) => {
+          body.amountInCents = 0;
+        },
+      },
+      {
+        name: 'rejects a negative amountInCents',
+        field: 'amountInCents',
+        reason: 'must be greater than zero.',
+        changeBody: (body) => {
+          body.amountInCents = -1;
+        },
+      },
+      {
+        name: 'rejects a decimal amountInCents',
+        field: 'amountInCents',
+        reason: 'must be an integer.',
+        changeBody: (body) => {
+          body.amountInCents = 1.5;
+        },
+      },
+      {
+        name: 'rejects amountInCents sent as a string',
+        field: 'amountInCents',
+        reason: 'must be a finite number.',
+        changeBody: (body) => {
+          body.amountInCents = '15990';
+        },
+      },
+      {
+        name: 'rejects amountInCents equal to null',
+        field: 'amountInCents',
+        reason: 'must be a finite number.',
+        changeBody: (body) => {
+          body.amountInCents = null;
+        },
+      },
+      {
+        name: 'rejects a request without currency',
+        field: 'currency',
+        reason: 'is required.',
+        changeBody: (body) => delete body.currency,
+      },
+      {
+        name: 'rejects an unsupported currency',
+        field: 'currency',
+        reason: 'must be BRL.',
+        changeBody: (body) => {
+          body.currency = 'USD';
+        },
+      },
+      {
+        name: 'rejects a currency containing only spaces',
+        field: 'currency',
+        reason: 'must be BRL.',
+        changeBody: (body) => {
+          body.currency = '   ';
+        },
+      },
+      {
+        name: 'rejects a request without paymentToken',
+        field: 'paymentToken',
+        reason: 'is required.',
+        changeBody: (body) => delete body.paymentToken,
+      },
+      {
+        name: 'rejects a paymentToken containing only spaces',
+        field: 'paymentToken',
+        reason: 'must be a non-empty string.',
+        changeBody: (body) => {
+          body.paymentToken = '   ';
+        },
+      },
+      {
+        name: 'rejects an unexpected request field',
+        field: 'cardNumber',
+        reason: 'is not allowed.',
+        changeBody: (body) => {
+          body.cardNumber = '4111111111111111';
+        },
+        sensitiveValues: [
+          'tok_approved',
+          '4111111111111111',
+        ],
+      },
+    ];
+
+    for (const bodyValidationCase of bodyValidationCases) {
+      test(bodyValidationCase.name, async ({ request }) => {
+        const requestBody: Record<string, unknown> = {
+          orderId: randomUUID(),
+          amountInCents: 15990,
+          currency: 'BRL',
+          paymentToken: 'tok_approved',
+        };
+
+        bodyValidationCase.changeBody(requestBody);
+
+        const response = await request.post(
+          'http://127.0.0.1:3003/payments',
+          {
+            headers: {
+              'Idempotency-Key': `payment-${randomUUID()}`,
+              'X-Correlation-Id': `correlation-${randomUUID()}`,
+            },
+            data: requestBody,
+          },
+        );
+
+        await expectPaymentRequestError(
+          response,
+          {
+            code: 'INVALID_PAYMENT_REQUEST',
+            message: 'The payment request is invalid.',
+            details: {
+              field: bodyValidationCase.field,
+              reason: bodyValidationCase.reason,
+            },
+          },
+          bodyValidationCase.sensitiveValues,
+        );
+      });
+    }
   });
 });
