@@ -14,7 +14,7 @@ process.env.no_proxy = [process.env.no_proxy, localAddresses]
   .join(',');
 
 export default defineConfig({
-  testDir: './api',
+  testDir: '.',
   fullyParallel: true,
   forbidOnly: true,
   retries: 0,
