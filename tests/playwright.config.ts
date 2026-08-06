@@ -1,10 +1,19 @@
 import { defineConfig } from '@playwright/test';
+import { config } from 'dotenv';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const testsDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(testsDirectory, '..');
 const localAddresses = '127.0.0.1,localhost';
+
+config({
+  path: [
+    path.join(repositoryRoot, '.env'),
+    path.join(repositoryRoot, '.env.example'),
+  ],
+  quiet: true,
+});
 
 process.env.NO_PROXY = [process.env.NO_PROXY, localAddresses]
   .filter(Boolean)
@@ -26,14 +35,23 @@ export default defineConfig({
       Accept: 'application/json',
     },
   },
-  webServer: {
-    command:
-      'node --import tsx services/inventory-service/src/server.ts',
-    cwd: repositoryRoot,
-    port: 3002,
-    reuseExistingServer: false,
-    timeout: 30_000,
-  },
+  webServer: [
+    {
+      command:
+        'node --import tsx services/inventory-service/src/server.ts',
+      cwd: repositoryRoot,
+      port: 3002,
+      reuseExistingServer: false,
+      timeout: 30_000,
+    },
+    {
+      command: 'node --import tsx services/payment-service/src/server.ts',
+      cwd: repositoryRoot,
+      port: 3003,
+      reuseExistingServer: false,
+      timeout: 30_000,
+    },
+  ],
   globalSetup: './support/global-setup.ts',
   reporter: [['list']],
 });
