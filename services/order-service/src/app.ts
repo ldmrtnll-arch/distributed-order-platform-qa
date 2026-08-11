@@ -1,12 +1,42 @@
-import express, { type Express } from 'express';
+import express, { type ErrorRequestHandler, type Express } from 'express';
 
 import { checkOrderDatabaseConnection } from './database/pool.js';
 import { getLoggedErrorDetails } from './errors/logged-error.js';
+import { ordersRouter } from './routes/orders.js';
+
+const malformedJsonErrorHandler: ErrorRequestHandler = (
+  error,
+  _request,
+  response,
+  next,
+) => {
+  if (error instanceof SyntaxError && Reflect.get(error, 'status') === 400) {
+    response.status(400).json({
+      code: 'INVALID_ORDER_REQUEST',
+      message: 'The order request is invalid.',
+      details: { field: 'body', reason: 'must contain valid JSON.' },
+    });
+    return;
+  }
+  next(error);
+};
 
 export function createApp(): Express {
   const app = express();
 
   app.disable('x-powered-by');
+  app.use(
+    '/orders',
+    express.raw({
+      type: (request) =>
+        request.headers['content-type']
+          ?.split(';', 1)[0]
+          ?.trim()
+          .toLowerCase() !== 'application/json',
+    }),
+  );
+  app.use(express.json());
+  app.use(ordersRouter);
 
   app.get('/health', async (_request, response) => {
     try {
@@ -33,6 +63,8 @@ export function createApp(): Express {
       });
     }
   });
+
+  app.use(malformedJsonErrorHandler);
 
   return app;
 }
