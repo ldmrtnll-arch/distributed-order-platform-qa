@@ -674,4 +674,161 @@ test.describe('POST /orders', () => {
       });
     }
   });
+
+  test.describe('payload validation', () => {
+    test('rejects a completely missing request body', async ({ request }) => {
+      const idempotencyKey = `order-${randomUUID()}`;
+      const response = await request.post(
+        'http://127.0.0.1:3001/orders',
+        {
+          headers: {
+            'Idempotency-Key': idempotencyKey,
+            'X-Correlation-Id': `correlation-${randomUUID()}`,
+          },
+        },
+      );
+
+      await expectOrderRequestError(
+        response,
+        {
+          code: 'INVALID_ORDER_REQUEST',
+          message: 'The order request is invalid.',
+          details: {
+            field: 'sku',
+            reason: 'is required.',
+          },
+        },
+        [idempotencyKey],
+      );
+      expect(await response.text()).not.toContain('PENDING');
+    });
+
+    test('rejects a JSON array request body', async ({ request }) => {
+      const idempotencyKey = `order-${randomUUID()}`;
+      const response = await request.post(
+        'http://127.0.0.1:3001/orders',
+        {
+          headers: {
+            'Idempotency-Key': idempotencyKey,
+            'X-Correlation-Id': `correlation-${randomUUID()}`,
+          },
+          data: [],
+        },
+      );
+
+      await expectOrderRequestError(
+        response,
+        {
+          code: 'INVALID_ORDER_REQUEST',
+          message: 'The order request is invalid.',
+          details: {
+            field: 'body',
+            reason: 'must be a JSON object.',
+          },
+        },
+        [idempotencyKey],
+      );
+      expect(await response.text()).not.toContain('PENDING');
+    });
+
+    test('rejects malformed JSON without exposing parser details', async ({
+      request,
+    }) => {
+      const idempotencyKey = `order-${randomUUID()}`;
+      const malformedBody = '{"sku":';
+      const response = await request.post(
+        'http://127.0.0.1:3001/orders',
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': idempotencyKey,
+            'X-Correlation-Id': `correlation-${randomUUID()}`,
+          },
+          data: malformedBody,
+        },
+      );
+
+      await expectOrderRequestError(
+        response,
+        {
+          code: 'INVALID_ORDER_REQUEST',
+          message: 'The order request is invalid.',
+          details: {
+            field: 'body',
+            reason: 'must contain valid JSON.',
+          },
+        },
+        [idempotencyKey, malformedBody],
+      );
+
+      const responseText = await response.text();
+      expect(responseText).not.toContain('PENDING');
+      expect(responseText).not.toMatch(
+        /SyntaxError|Unexpected token|JSON at position|body-parser|express[\\/]|node_modules|services[\\/]|[A-Z]:\\/i,
+      );
+    });
+
+    test('rejects a raw body with a text/plain Content-Type', async ({
+      request,
+    }) => {
+      const idempotencyKey = `order-${randomUUID()}`;
+      const rawBody = 'unexpected order body';
+      const response = await request.post(
+        'http://127.0.0.1:3001/orders',
+        {
+          headers: {
+            'Content-Type': 'text/plain',
+            'Idempotency-Key': idempotencyKey,
+            'X-Correlation-Id': `correlation-${randomUUID()}`,
+          },
+          data: rawBody,
+        },
+      );
+
+      await expectOrderRequestError(
+        response,
+        {
+          code: 'INVALID_ORDER_REQUEST',
+          message: 'The order request is invalid.',
+          details: {
+            field: 'sku',
+            reason: 'is required.',
+          },
+        },
+        [idempotencyKey, rawBody],
+      );
+      expect(await response.text()).not.toContain('PENDING');
+    });
+
+    test('rejects a raw body without an application/json Content-Type', async ({
+      request,
+    }) => {
+      const idempotencyKey = `order-${randomUUID()}`;
+      const rawBody = 'unexpected order body';
+      const response = await request.post(
+        'http://127.0.0.1:3001/orders',
+        {
+          headers: {
+            'Idempotency-Key': idempotencyKey,
+            'X-Correlation-Id': `correlation-${randomUUID()}`,
+          },
+          data: rawBody,
+        },
+      );
+
+      await expectOrderRequestError(
+        response,
+        {
+          code: 'INVALID_ORDER_REQUEST',
+          message: 'The order request is invalid.',
+          details: {
+            field: 'sku',
+            reason: 'is required.',
+          },
+        },
+        [idempotencyKey, rawBody],
+      );
+      expect(await response.text()).not.toContain('PENDING');
+    });
+  });
 });
