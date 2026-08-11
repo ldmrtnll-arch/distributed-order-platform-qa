@@ -831,4 +831,91 @@ test.describe('POST /orders', () => {
       expect(await response.text()).not.toContain('PENDING');
     });
   });
+
+  test.describe('concurrent creation', () => {
+    test('creates one order when concurrent requests use the same idempotency key', async ({
+      request,
+    }) => {
+      const idempotencyKey = `order-${randomUUID()}`;
+      const requestBody: OrderRequestBody = {
+        sku: 'BOOK-001',
+        quantity: 3,
+        amountInCents: 7990,
+        currency: 'BRL',
+        paymentToken: 'tok_approved',
+      };
+      const firstCorrelationId = `correlation-${randomUUID()}`;
+      const secondCorrelationId = `correlation-${randomUUID()}`;
+
+      const responses = await Promise.all([
+        request.post('http://127.0.0.1:3001/orders', {
+          headers: {
+            'Idempotency-Key': idempotencyKey,
+            'X-Correlation-Id': firstCorrelationId,
+          },
+          data: requestBody,
+        }),
+        request.post('http://127.0.0.1:3001/orders', {
+          headers: {
+            'Idempotency-Key': idempotencyKey,
+            'X-Correlation-Id': secondCorrelationId,
+          },
+          data: requestBody,
+        }),
+      ]);
+
+      expect(responses.map((response) => response.status()).sort()).toEqual([
+        200, 201,
+      ]);
+      expect(
+        responses.filter(
+          (response) =>
+            response.headers()['idempotent-replay'] === 'true',
+        ),
+      ).toHaveLength(1);
+
+      const creationResponse = responses.find(
+        (response) => response.status() === 201,
+      );
+      const replayResponse = responses.find(
+        (response) => response.status() === 200,
+      );
+      expect(creationResponse).toBeDefined();
+      expect(replayResponse).toBeDefined();
+      if (creationResponse === undefined || replayResponse === undefined) {
+        throw new Error('Expected one creation response and one replay.');
+      }
+
+      expect(creationResponse.headers()).not.toHaveProperty(
+        'idempotent-replay',
+      );
+      expect(replayResponse.headers()['idempotent-replay']).toBe('true');
+
+      const createdOrder = await readPendingOrder(creationResponse, 201);
+      const replayedOrder = await readPendingOrder(replayResponse, 200);
+
+      expect(createdOrder).toEqual({
+        orderId: createdOrder.orderId,
+        sku: 'BOOK-001',
+        quantity: 3,
+        amountInCents: 7990,
+        currency: 'BRL',
+        status: 'PENDING',
+        createdAt: createdOrder.createdAt,
+      });
+      expect(replayedOrder).toEqual(createdOrder);
+      expect(replayedOrder.orderId).toBe(createdOrder.orderId);
+      expect(replayedOrder.createdAt).toBe(createdOrder.createdAt);
+      expect(replayedOrder.status).toBe('PENDING');
+      expectSafeOrderBody(createdOrder, idempotencyKey);
+      expectSafeOrderBody(replayedOrder, idempotencyKey);
+
+      await expectOriginalOrderReplay(
+        request,
+        idempotencyKey,
+        requestBody,
+        createdOrder,
+      );
+    });
+  });
 });
