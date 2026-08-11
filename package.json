@@ -14,6 +14,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "playwright test --config tests/playwright.config.ts",
     "test:resilience:inventory": "playwright test --config tests/playwright.resilience.config.ts",
+    "test:resilience:order": "playwright test --config tests/playwright.order-resilience.config.ts",
     "test:resilience:payment": "playwright test --config tests/playwright.payment-resilience.config.ts",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down --remove-orphans",

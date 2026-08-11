@@ -51,6 +51,13 @@ export default defineConfig({
       reuseExistingServer: false,
       timeout: 30_000,
     },
+    {
+      command: 'node --import tsx services/order-service/src/server.ts',
+      cwd: repositoryRoot,
+      port: 3001,
+      reuseExistingServer: false,
+      timeout: 30_000,
+    },
   ],
   globalSetup: './support/global-setup.ts',
   reporter: [['list']],
