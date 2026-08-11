@@ -138,6 +138,73 @@ async function expectOriginalOrderReplay(
   expectSafeOrderBody(replayedOrder, idempotencyKey);
 }
 
+interface OrderRequestError {
+  code: 'IDEMPOTENCY_KEY_REQUIRED' | 'INVALID_ORDER_REQUEST';
+  message: string;
+  details?: {
+    field: string;
+    reason: string;
+  };
+}
+
+const validOrderRequestBody: Record<string, unknown> = {
+  sku: 'BOOK-001',
+  quantity: 2,
+  amountInCents: 5990,
+  currency: 'BRL',
+  paymentToken: 'tok_approved',
+};
+
+function withoutOrderField(field: string): Record<string, unknown> {
+  const body = { ...validOrderRequestBody };
+  delete body[field];
+  return body;
+}
+
+async function postOrderForValidation(
+  request: APIRequestContext,
+  body: Record<string, unknown>,
+  idempotencyKey?: string,
+): Promise<APIResponse> {
+  return request.post('http://127.0.0.1:3001/orders', {
+    headers: {
+      ...(idempotencyKey === undefined
+        ? {}
+        : { 'Idempotency-Key': idempotencyKey }),
+      'X-Correlation-Id': `correlation-${randomUUID()}`,
+    },
+    data: body,
+  });
+}
+
+async function expectOrderRequestError(
+  response: APIResponse,
+  expectedBody: OrderRequestError,
+  sensitiveValues: string[],
+): Promise<void> {
+  expect(response.status()).toBe(400);
+  expect(response.headers()['content-type']).toMatch(
+    /^application\/json(?:;|$)/,
+  );
+  expect(response.headers()).not.toHaveProperty('x-powered-by');
+  expect(response.headers()).not.toHaveProperty('idempotent-replay');
+
+  const body = (await response.json()) as unknown;
+
+  expect(body).toEqual(expectedBody);
+
+  const serializedBody = JSON.stringify(body);
+  for (const sensitiveValue of sensitiveValues) {
+    expect(serializedBody).not.toContain(sensitiveValue);
+  }
+  expect(serializedBody).not.toMatch(
+    /orderId|idempotencyKey|requestFingerprint|fingerprint/i,
+  );
+  expect(serializedBody).not.toMatch(
+    /password|postgres(?:ql)?:\/\/[^\s"]+@|connection[ _-]?string|stack(?: trace)?|\.env|\bselect\b|\binsert\b|\bupdate\b|\bdelete\b|node_modules|services[\\/]|[a-z]:\\/i,
+  );
+}
+
 test.describe('POST /orders', () => {
   test('creates a pending order and replays the same request idempotently', async ({
     request,
@@ -396,5 +463,215 @@ test.describe('POST /orders', () => {
         createdOrder,
       );
     });
+  });
+
+  test.describe('request validation', () => {
+    test('requires the Idempotency-Key header', async ({ request }) => {
+      const response = await postOrderForValidation(
+        request,
+        validOrderRequestBody,
+      );
+
+      await expectOrderRequestError(
+        response,
+        {
+          code: 'IDEMPOTENCY_KEY_REQUIRED',
+          message: 'The Idempotency-Key header is required.',
+        },
+        ['tok_approved'],
+      );
+    });
+
+    test('rejects an Idempotency-Key containing only spaces', async ({
+      request,
+    }) => {
+      const response = await postOrderForValidation(
+        request,
+        validOrderRequestBody,
+        '   ',
+      );
+
+      await expectOrderRequestError(
+        response,
+        {
+          code: 'IDEMPOTENCY_KEY_REQUIRED',
+          message: 'The Idempotency-Key header is required.',
+        },
+        ['tok_approved'],
+      );
+    });
+
+    const validationCases: Array<{
+      name: string;
+      body: () => Record<string, unknown>;
+      field: string;
+      reason: string;
+    }> = [
+      {
+        name: 'rejects a request without sku',
+        body: () => withoutOrderField('sku'),
+        field: 'sku',
+        reason: 'is required.',
+      },
+      {
+        name: 'rejects a non-string sku',
+        body: () => ({ ...validOrderRequestBody, sku: 123 }),
+        field: 'sku',
+        reason: 'must be a string.',
+      },
+      {
+        name: 'rejects a sku containing only spaces',
+        body: () => ({ ...validOrderRequestBody, sku: '   ' }),
+        field: 'sku',
+        reason: 'must be a non-empty string.',
+      },
+      {
+        name: 'rejects a request without quantity',
+        body: () => withoutOrderField('quantity'),
+        field: 'quantity',
+        reason: 'is required.',
+      },
+      {
+        name: 'rejects quantity equal to zero',
+        body: () => ({ ...validOrderRequestBody, quantity: 0 }),
+        field: 'quantity',
+        reason: 'must be greater than zero.',
+      },
+      {
+        name: 'rejects a negative quantity',
+        body: () => ({ ...validOrderRequestBody, quantity: -1 }),
+        field: 'quantity',
+        reason: 'must be greater than zero.',
+      },
+      {
+        name: 'rejects a decimal quantity',
+        body: () => ({ ...validOrderRequestBody, quantity: 1.5 }),
+        field: 'quantity',
+        reason: 'must be an integer.',
+      },
+      {
+        name: 'rejects quantity sent as a string',
+        body: () => ({ ...validOrderRequestBody, quantity: '2' }),
+        field: 'quantity',
+        reason: 'must be a finite number.',
+      },
+      {
+        name: 'rejects quantity equal to null',
+        body: () => ({ ...validOrderRequestBody, quantity: null }),
+        field: 'quantity',
+        reason: 'must be a finite number.',
+      },
+      {
+        name: 'rejects a request without amountInCents',
+        body: () => withoutOrderField('amountInCents'),
+        field: 'amountInCents',
+        reason: 'is required.',
+      },
+      {
+        name: 'rejects amountInCents equal to zero',
+        body: () => ({ ...validOrderRequestBody, amountInCents: 0 }),
+        field: 'amountInCents',
+        reason: 'must be greater than zero.',
+      },
+      {
+        name: 'rejects a negative amountInCents',
+        body: () => ({ ...validOrderRequestBody, amountInCents: -100 }),
+        field: 'amountInCents',
+        reason: 'must be greater than zero.',
+      },
+      {
+        name: 'rejects a decimal amountInCents',
+        body: () => ({ ...validOrderRequestBody, amountInCents: 5990.5 }),
+        field: 'amountInCents',
+        reason: 'must be an integer.',
+      },
+      {
+        name: 'rejects amountInCents sent as a string',
+        body: () => ({ ...validOrderRequestBody, amountInCents: '5990' }),
+        field: 'amountInCents',
+        reason: 'must be a finite number.',
+      },
+      {
+        name: 'rejects amountInCents equal to null',
+        body: () => ({ ...validOrderRequestBody, amountInCents: null }),
+        field: 'amountInCents',
+        reason: 'must be a finite number.',
+      },
+      {
+        name: 'rejects a request without currency',
+        body: () => withoutOrderField('currency'),
+        field: 'currency',
+        reason: 'is required.',
+      },
+      {
+        name: 'rejects a non-string currency',
+        body: () => ({ ...validOrderRequestBody, currency: 123 }),
+        field: 'currency',
+        reason: 'must be a string.',
+      },
+      {
+        name: 'rejects a currency containing only spaces',
+        body: () => ({ ...validOrderRequestBody, currency: '   ' }),
+        field: 'currency',
+        reason: 'must be a non-empty string.',
+      },
+      {
+        name: 'rejects an unsupported currency',
+        body: () => ({ ...validOrderRequestBody, currency: 'USD' }),
+        field: 'currency',
+        reason: 'must be BRL.',
+      },
+      {
+        name: 'rejects a request without paymentToken',
+        body: () => withoutOrderField('paymentToken'),
+        field: 'paymentToken',
+        reason: 'is required.',
+      },
+      {
+        name: 'rejects a non-string paymentToken',
+        body: () => ({ ...validOrderRequestBody, paymentToken: 123 }),
+        field: 'paymentToken',
+        reason: 'must be a string.',
+      },
+      {
+        name: 'rejects a paymentToken containing only spaces',
+        body: () => ({ ...validOrderRequestBody, paymentToken: '   ' }),
+        field: 'paymentToken',
+        reason: 'must be a non-empty string.',
+      },
+      {
+        name: 'rejects an unexpected request field',
+        body: () => ({
+          ...validOrderRequestBody,
+          unexpectedField: 'unexpected',
+        }),
+        field: 'unexpectedField',
+        reason: 'is not allowed.',
+      },
+    ];
+
+    for (const validationCase of validationCases) {
+      test(validationCase.name, async ({ request }) => {
+        const idempotencyKey = `order-${randomUUID()}`;
+        const response = await postOrderForValidation(
+          request,
+          validationCase.body(),
+          idempotencyKey,
+        );
+
+        await expectOrderRequestError(
+          response,
+          {
+            code: 'INVALID_ORDER_REQUEST',
+            message: 'The order request is invalid.',
+            details: {
+              field: validationCase.field,
+              reason: validationCase.reason,
+            },
+          },
+          ['tok_approved', idempotencyKey],
+        );
+      });
+    }
   });
 });
