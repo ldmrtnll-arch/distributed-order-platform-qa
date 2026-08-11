@@ -22,6 +22,7 @@ config({
 export default async function globalSetup(): Promise<void> {
   const inventoryConnectionString = process.env.INVENTORY_DATABASE_URL;
   const paymentConnectionString = process.env.PAYMENT_DATABASE_URL;
+  const orderConnectionString = process.env.ORDER_DATABASE_URL;
 
   if (
     inventoryConnectionString === undefined ||
@@ -34,6 +35,12 @@ export default async function globalSetup(): Promise<void> {
     paymentConnectionString.trim() === ''
   ) {
     throw new Error('PAYMENT_DATABASE_URL is required for API tests.');
+  }
+  if (
+    orderConnectionString === undefined ||
+    orderConnectionString.trim() === ''
+  ) {
+    throw new Error('ORDER_DATABASE_URL is required for API tests.');
   }
 
   const databaseDirectory = path.join(
@@ -91,6 +98,17 @@ export default async function globalSetup(): Promise<void> {
       'database',
       'migrations',
       '001_create_payments.sql',
+    ),
+    'utf8',
+  );
+  const orderMigration = await readFile(
+    path.join(
+      repositoryRoot,
+      'services',
+      'order-service',
+      'database',
+      'migrations',
+      '001_create_orders.sql',
     ),
     'utf8',
   );
@@ -447,5 +465,15 @@ export default async function globalSetup(): Promise<void> {
     await paymentClient.query('DELETE FROM payments');
   } finally {
     await paymentClient.end();
+  }
+
+  const orderClient = new Client({ connectionString: orderConnectionString });
+
+  try {
+    await orderClient.connect();
+    await orderClient.query(orderMigration);
+    await orderClient.query('DELETE FROM orders');
+  } finally {
+    await orderClient.end();
   }
 }
