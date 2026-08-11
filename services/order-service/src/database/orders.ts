@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 
 import type { OrderRequest } from '../validation/order.js';
+import type { InventoryRejectionCode } from '../clients/inventory-client.js';
 import { orderDatabasePool } from './pool.js';
 
 export interface Order {
@@ -10,14 +11,24 @@ export interface Order {
   quantity: number;
   amountInCents: number;
   currency: 'BRL';
-  status: 'PENDING';
+  status: 'PENDING' | 'INVENTORY_RESERVED' | 'INVENTORY_REJECTED';
   createdAt: string;
 }
 
 export type CreateOrderResult =
   | { kind: 'created'; order: Order }
-  | { kind: 'replayed'; order: Order }
+  | { kind: 'existing'; order: Order }
   | { kind: 'idempotency-conflict' };
+
+export type MarkInventoryReservedResult =
+  | { kind: 'updated'; order: Order }
+  | { kind: 'already-updated'; order: Order }
+  | { kind: 'state-conflict' };
+
+export type MarkInventoryRejectedResult =
+  | { kind: 'updated'; order: Order }
+  | { kind: 'already-updated'; order: Order }
+  | { kind: 'state-conflict' };
 
 interface OrderRow {
   orderId: string;
@@ -25,7 +36,9 @@ interface OrderRow {
   quantity: number;
   amountInCents: number;
   currency: 'BRL';
-  status: 'PENDING';
+  status: Order['status'];
+  inventoryReservationId: string | null;
+  failureCode: string | null;
   requestFingerprint: string;
   createdAt: Date;
 }
@@ -85,6 +98,8 @@ export async function createOrder(
          amount AS "amountInCents",
          currency,
          status,
+         inventory_reservation_id AS "inventoryReservationId",
+         failure_code AS "failureCode",
          request_fingerprint AS "requestFingerprint",
          created_at AS "createdAt"
        FROM orders
@@ -98,7 +113,7 @@ export async function createOrder(
       if (existingOrder.requestFingerprint !== requestFingerprint) {
         return { kind: 'idempotency-conflict' };
       }
-      return { kind: 'replayed', order: mapOrder(existingOrder) };
+      return { kind: 'existing', order: mapOrder(existingOrder) };
     }
 
     const orderId = randomUUID();
@@ -121,6 +136,8 @@ export async function createOrder(
          amount AS "amountInCents",
          currency,
          status,
+         inventory_reservation_id AS "inventoryReservationId",
+         failure_code AS "failureCode",
          request_fingerprint AS "requestFingerprint",
          created_at AS "createdAt"`,
       [
@@ -146,4 +163,124 @@ export async function createOrder(
   } finally {
     client.release();
   }
+}
+
+export async function markInventoryReserved(
+  orderId: string,
+  reservationId: string,
+): Promise<MarkInventoryReservedResult> {
+  const updatedResult = await orderDatabasePool.query<OrderRow>(
+    `UPDATE orders
+     SET status = 'INVENTORY_RESERVED',
+         inventory_reservation_id = $2,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE order_id = $1
+       AND status = 'PENDING'
+     RETURNING
+       order_id AS "orderId",
+       sku,
+       quantity,
+       amount AS "amountInCents",
+       currency,
+       status,
+       inventory_reservation_id AS "inventoryReservationId",
+       failure_code AS "failureCode",
+       request_fingerprint AS "requestFingerprint",
+       created_at AS "createdAt"`,
+    [orderId, reservationId],
+  );
+  const updatedOrder = updatedResult.rows[0];
+
+  if (updatedOrder !== undefined) {
+    return { kind: 'updated', order: mapOrder(updatedOrder) };
+  }
+
+  const currentResult = await orderDatabasePool.query<OrderRow>(
+    `SELECT
+       order_id AS "orderId",
+       sku,
+       quantity,
+       amount AS "amountInCents",
+       currency,
+       status,
+       inventory_reservation_id AS "inventoryReservationId",
+       failure_code AS "failureCode",
+       request_fingerprint AS "requestFingerprint",
+       created_at AS "createdAt"
+     FROM orders
+     WHERE order_id = $1`,
+    [orderId],
+  );
+  const currentOrder = currentResult.rows[0];
+
+  if (
+    currentOrder !== undefined &&
+    currentOrder.status === 'INVENTORY_RESERVED' &&
+    currentOrder.inventoryReservationId === reservationId
+  ) {
+    return { kind: 'already-updated', order: mapOrder(currentOrder) };
+  }
+
+  return { kind: 'state-conflict' };
+}
+
+export async function markInventoryRejected(
+  orderId: string,
+  failureCode: InventoryRejectionCode,
+): Promise<MarkInventoryRejectedResult> {
+  const updatedResult = await orderDatabasePool.query<OrderRow>(
+    `UPDATE orders
+     SET status = 'INVENTORY_REJECTED',
+         inventory_reservation_id = NULL,
+         payment_id = NULL,
+         failure_code = $2,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE order_id = $1
+       AND status = 'PENDING'
+     RETURNING
+       order_id AS "orderId",
+       sku,
+       quantity,
+       amount AS "amountInCents",
+       currency,
+       status,
+       inventory_reservation_id AS "inventoryReservationId",
+       failure_code AS "failureCode",
+       request_fingerprint AS "requestFingerprint",
+       created_at AS "createdAt"`,
+    [orderId, failureCode],
+  );
+  const updatedOrder = updatedResult.rows[0];
+
+  if (updatedOrder !== undefined) {
+    return { kind: 'updated', order: mapOrder(updatedOrder) };
+  }
+
+  const currentResult = await orderDatabasePool.query<OrderRow>(
+    `SELECT
+       order_id AS "orderId",
+       sku,
+       quantity,
+       amount AS "amountInCents",
+       currency,
+       status,
+       inventory_reservation_id AS "inventoryReservationId",
+       failure_code AS "failureCode",
+       request_fingerprint AS "requestFingerprint",
+       created_at AS "createdAt"
+     FROM orders
+     WHERE order_id = $1`,
+    [orderId],
+  );
+  const currentOrder = currentResult.rows[0];
+
+  if (
+    currentOrder !== undefined &&
+    currentOrder.status === 'INVENTORY_REJECTED' &&
+    currentOrder.failureCode === failureCode
+  ) {
+    return { kind: 'already-updated', order: mapOrder(currentOrder) };
+  }
+
+  return { kind: 'state-conflict' };
 }
