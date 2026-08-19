@@ -4,6 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from 'pg';
 
+import { orderInventoryFixtures } from './order-inventory-fixtures.js';
+
 const testsDirectory = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
@@ -126,6 +128,11 @@ export default async function globalSetup(): Promise<void> {
 
     await inventoryClient.query('BEGIN');
 
+    const orderInventoryProducts = Object.values(orderInventoryFixtures);
+    const orderInventorySkus = orderInventoryProducts.map(
+      (product) => product.sku,
+    );
+
     await inventoryClient.query('DELETE FROM inventory_reservations');
 
     await inventoryClient.query(`
@@ -134,6 +141,34 @@ export default async function globalSetup(): Promise<void> {
     `);
 
     await inventoryClient.query(productsSeed);
+
+    await inventoryClient.query(
+      `INSERT INTO products (
+         sku,
+         name,
+         total_quantity,
+         reserved_quantity
+       )
+       SELECT *
+       FROM UNNEST(
+         $1::text[],
+         $2::text[],
+         $3::integer[],
+         $4::integer[]
+       )
+       ON CONFLICT (sku)
+       DO UPDATE SET
+         name = EXCLUDED.name,
+         total_quantity = EXCLUDED.total_quantity,
+         reserved_quantity = EXCLUDED.reserved_quantity,
+         updated_at = CURRENT_TIMESTAMP`,
+      [
+        orderInventorySkus,
+        orderInventoryProducts.map((product) => product.name),
+        orderInventoryProducts.map((product) => product.totalQuantity),
+        orderInventoryProducts.map(() => 0),
+      ],
+    );
 
     await inventoryClient.query(`
       INSERT INTO products (
