@@ -52,6 +52,19 @@ export async function readInventoryProduct(
   return rows[0] ?? null;
 }
 
+export async function countInventoryProductsBySku(
+  sku: string,
+): Promise<number> {
+  const rows = await queryInventoryDatabase<CountRow>(
+    `SELECT COUNT(*)::integer AS count
+     FROM products
+     WHERE sku = $1`,
+    [sku],
+  );
+
+  return rows[0]?.count ?? -1;
+}
+
 export async function readOrderById(
   orderId: string,
 ): Promise<OrderDatabaseRow[]> {
@@ -113,6 +126,16 @@ export async function countInventoryReservationsBySku(
   );
 
   return rows[0]?.count ?? -1;
+}
+
+export async function cleanupOrderByIdempotencyKey(
+  idempotencyKey: string,
+): Promise<void> {
+  await queryOrderDatabase(
+    `DELETE FROM orders
+     WHERE idempotency_key = $1`,
+    [idempotencyKey],
+  );
 }
 
 export async function cleanupOrderInventoryFixture({
