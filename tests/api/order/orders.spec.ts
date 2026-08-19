@@ -120,7 +120,7 @@ async function expectIdempotencyConflict(
     expect(serializedBody).not.toContain(sensitiveValue);
   }
   expect(serializedBody).not.toMatch(
-    /orderId|paymentToken|idempotencyKey|requestFingerprint|fingerprint/i,
+    /orderId|paymentToken|idempotencyKey|requestFingerprint|fingerprint|inventoryReservationId/i,
   );
   expect(serializedBody).not.toMatch(
     /password|postgres(?:ql)?:\/\/[^\s"]+@|connection[ _-]?string|stack(?: trace)?|\.env|\bselect\b|\binsert\b|\bupdate\b|\bdelete\b|node_modules|services[\\/]|[a-z]:\\/i,
@@ -405,202 +405,322 @@ test.describe('POST /orders', () => {
   });
 
   test.describe('idempotency conflicts', () => {
-    test('rejects reuse of an idempotency key with a different sku', async ({
-      request,
-    }) => {
-      const idempotencyKey = `order-${randomUUID()}`;
-      const originalBody: OrderRequestBody = {
-        sku: 'BOOK-001',
-        quantity: 2,
-        amountInCents: 5990,
-        currency: 'BRL',
-        paymentToken: 'tok_approved',
+    const conflictCases = [
+      {
+        title: 'rejects reuse of an idempotency key with a different sku',
+        fixture: orderInventoryFixtures.idempotencyConflictSku,
+        changedField: 'sku',
+        changedValue: 'ORDER-CONFLICT-SKU-CHANGED',
+      },
+      {
+        title:
+          'rejects reuse of an idempotency key with a different quantity',
+        fixture: orderInventoryFixtures.idempotencyConflictQuantity,
+        changedField: 'quantity',
+        changedValue: 3,
+      },
+      {
+        title:
+          'rejects reuse of an idempotency key with a different amount',
+        fixture: orderInventoryFixtures.idempotencyConflictAmount,
+        changedField: 'amountInCents',
+        changedValue: 6990,
+      },
+      {
+        title:
+          'rejects reuse of an idempotency key with a different payment token',
+        fixture: orderInventoryFixtures.idempotencyConflictToken,
+        changedField: 'paymentToken',
+        changedValue: 'tok_declined',
+      },
+    ] as const satisfies ReadonlyArray<{
+      title: string;
+      fixture: {
+        readonly sku: string;
+        readonly totalQuantity: number;
       };
+      changedField: keyof OrderRequestBody;
+      changedValue: string | number;
+    }>;
 
-      const creationResponse = await request.post(
-        'http://127.0.0.1:3001/orders',
-        {
-          headers: {
-            'Idempotency-Key': idempotencyKey,
-            'X-Correlation-Id': `correlation-${randomUUID()}`,
-          },
-          data: originalBody,
-        },
-      );
-      const createdOrder = await readPendingOrder(creationResponse, 201);
+    for (const conflictCase of conflictCases) {
+      test(conflictCase.title, async ({ request }) => {
+        const { fixture } = conflictCase;
+        const idempotencyKey = `order-conflict-${conflictCase.changedField}-${randomUUID()}`;
+        const creationCorrelationId = `order-conflict-create-${randomUUID()}`;
+        const conflictCorrelationId = `order-conflict-attempt-${randomUUID()}`;
+        const replayCorrelationId = `order-conflict-replay-${randomUUID()}`;
+        const originalBody: OrderRequestBody = {
+          sku: fixture.sku,
+          quantity: 2,
+          amountInCents: 5990,
+          currency: 'BRL',
+          paymentToken: 'tok_approved',
+        };
+        const conflictBody: OrderRequestBody = {
+          ...originalBody,
+          [conflictCase.changedField]: conflictCase.changedValue,
+        };
 
-      const conflictResponse = await request.post(
-        'http://127.0.0.1:3001/orders',
-        {
-          headers: {
-            'Idempotency-Key': idempotencyKey,
-            'X-Correlation-Id': `correlation-${randomUUID()}`,
-          },
-          data: { ...originalBody, sku: 'BOOK-002' },
-        },
-      );
+        expect(conflictBody).toEqual({
+          ...originalBody,
+          [conflictCase.changedField]: conflictCase.changedValue,
+        });
 
-      await expectIdempotencyConflict(conflictResponse, [
-        idempotencyKey,
-        originalBody.paymentToken,
-      ]);
-      await expectOriginalOrderReplay(
-        request,
-        idempotencyKey,
-        originalBody,
-        createdOrder,
-      );
-    });
+        try {
+          const [initialProduct, initialReservations, initialOrders] =
+            await Promise.all([
+              readInventoryProduct(fixture.sku),
+              countInventoryReservationsBySku(fixture.sku),
+              countOrdersByIdempotencyKey(idempotencyKey),
+            ]);
 
-    test('rejects reuse of an idempotency key with a different quantity', async ({
-      request,
-    }) => {
-      const idempotencyKey = `order-${randomUUID()}`;
-      const originalBody: OrderRequestBody = {
-        sku: 'BOOK-001',
-        quantity: 2,
-        amountInCents: 5990,
-        currency: 'BRL',
-        paymentToken: 'tok_approved',
-      };
+          expect(initialProduct).toEqual({
+            sku: fixture.sku,
+            totalQuantity: fixture.totalQuantity,
+            reservedQuantity: 0,
+            availableQuantity: fixture.totalQuantity,
+          });
+          expect(initialReservations).toBe(0);
+          expect(initialOrders).toBe(0);
 
-      const creationResponse = await request.post(
-        'http://127.0.0.1:3001/orders',
-        {
-          headers: {
-            'Idempotency-Key': idempotencyKey,
-            'X-Correlation-Id': `correlation-${randomUUID()}`,
-          },
-          data: originalBody,
-        },
-      );
-      const createdOrder = await readPendingOrder(creationResponse, 201);
+          const creationResponse = await request.post(
+            'http://127.0.0.1:3001/orders',
+            {
+              headers: {
+                'Idempotency-Key': idempotencyKey,
+                'X-Correlation-Id': creationCorrelationId,
+              },
+              data: originalBody,
+            },
+          );
 
-      const conflictResponse = await request.post(
-        'http://127.0.0.1:3001/orders',
-        {
-          headers: {
-            'Idempotency-Key': idempotencyKey,
-            'X-Correlation-Id': `correlation-${randomUUID()}`,
-          },
-          data: { ...originalBody, quantity: 3 },
-        },
-      );
+          expect(creationResponse.headers()).not.toHaveProperty(
+            'idempotent-replay',
+          );
+          const createdOrder = await readPendingOrder(
+            creationResponse,
+            201,
+            'INVENTORY_RESERVED',
+          );
+          expect(createdOrder).toEqual({
+            orderId: createdOrder.orderId,
+            sku: fixture.sku,
+            quantity: 2,
+            amountInCents: 5990,
+            currency: 'BRL',
+            status: 'INVENTORY_RESERVED',
+            createdAt: createdOrder.createdAt,
+          });
+          expectSafeOrderBody(createdOrder, idempotencyKey, [
+            creationCorrelationId,
+          ]);
 
-      await expectIdempotencyConflict(conflictResponse, [
-        idempotencyKey,
-        originalBody.paymentToken,
-      ]);
-      await expectOriginalOrderReplay(
-        request,
-        idempotencyKey,
-        originalBody,
-        createdOrder,
-      );
-    });
+          const [createdOrderRows, createdReservations, productAfterCreation] =
+            await Promise.all([
+              readOrderById(createdOrder.orderId),
+              readInventoryReservationsByOrderId(createdOrder.orderId),
+              readInventoryProduct(fixture.sku),
+            ]);
 
-    test('rejects reuse of an idempotency key with a different amount', async ({
-      request,
-    }) => {
-      const idempotencyKey = `order-${randomUUID()}`;
-      const originalBody: OrderRequestBody = {
-        sku: 'BOOK-001',
-        quantity: 2,
-        amountInCents: 5990,
-        currency: 'BRL',
-        paymentToken: 'tok_approved',
-      };
+          expect(createdOrderRows).toHaveLength(1);
+          const createdOrderRow = createdOrderRows[0];
+          expect(createdOrderRow).toBeDefined();
+          if (createdOrderRow === undefined) {
+            throw new Error('Created Order row was not found.');
+          }
+          expect(createdOrderRow).toMatchObject({
+            orderId: createdOrder.orderId,
+            status: 'INVENTORY_RESERVED',
+            paymentId: null,
+            failureCode: null,
+          });
+          expect(createdOrderRow.inventoryReservationId).toMatch(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+          );
+          const inventoryReservationId =
+            createdOrderRow.inventoryReservationId;
+          if (inventoryReservationId === null) {
+            throw new Error('Created Order has no Inventory reservation.');
+          }
+          const createdUpdatedAt = createdOrderRow.updatedAt.toISOString();
 
-      const creationResponse = await request.post(
-        'http://127.0.0.1:3001/orders',
-        {
-          headers: {
-            'Idempotency-Key': idempotencyKey,
-            'X-Correlation-Id': `correlation-${randomUUID()}`,
-          },
-          data: originalBody,
-        },
-      );
-      const createdOrder = await readPendingOrder(creationResponse, 201);
+          expect(createdReservations).toEqual([
+            {
+              reservationId: inventoryReservationId,
+              orderId: createdOrder.orderId,
+              sku: fixture.sku,
+              quantity: 2,
+              status: 'RESERVED',
+              releaseIdempotencyKey: null,
+              releaseRequestFingerprint: null,
+              releasedAt: null,
+            },
+          ]);
+          const createdReservationId =
+            createdReservations[0]?.reservationId;
+          expect(createdReservationId).toBe(inventoryReservationId);
 
-      const conflictResponse = await request.post(
-        'http://127.0.0.1:3001/orders',
-        {
-          headers: {
-            'Idempotency-Key': idempotencyKey,
-            'X-Correlation-Id': `correlation-${randomUUID()}`,
-          },
-          data: { ...originalBody, amountInCents: 6990 },
-        },
-      );
+          expect(productAfterCreation).toEqual({
+            sku: fixture.sku,
+            totalQuantity: fixture.totalQuantity,
+            reservedQuantity: 2,
+            availableQuantity: fixture.totalQuantity - 2,
+          });
+          expectSafeOrderBody(createdOrder, idempotencyKey, [
+            creationCorrelationId,
+            inventoryReservationId,
+          ]);
 
-      await expectIdempotencyConflict(conflictResponse, [
-        idempotencyKey,
-        originalBody.paymentToken,
-      ]);
-      await expectOriginalOrderReplay(
-        request,
-        idempotencyKey,
-        originalBody,
-        createdOrder,
-      );
-    });
+          const conflictResponse = await request.post(
+            'http://127.0.0.1:3001/orders',
+            {
+              headers: {
+                'Idempotency-Key': idempotencyKey,
+                'X-Correlation-Id': conflictCorrelationId,
+              },
+              data: conflictBody,
+            },
+          );
 
-    test('rejects reuse of an idempotency key with a different payment token', async ({
-      request,
-    }) => {
-      const idempotencyKey = `order-${randomUUID()}`;
-      const originalBody: OrderRequestBody = {
-        sku: 'BOOK-001',
-        quantity: 2,
-        amountInCents: 5990,
-        currency: 'BRL',
-        paymentToken: 'tok_approved',
-      };
+          const conflictSensitiveValues = [
+            idempotencyKey,
+            originalBody.paymentToken,
+            createdOrder.orderId,
+            inventoryReservationId,
+            creationCorrelationId,
+            conflictCorrelationId,
+            ...(conflictCase.changedField === 'paymentToken'
+              ? [String(conflictCase.changedValue)]
+              : []),
+          ];
+          await expectIdempotencyConflict(
+            conflictResponse,
+            conflictSensitiveValues,
+          );
 
-      const creationResponse = await request.post(
-        'http://127.0.0.1:3001/orders',
-        {
-          headers: {
-            'Idempotency-Key': idempotencyKey,
-            'X-Correlation-Id': `correlation-${randomUUID()}`,
-          },
-          data: originalBody,
-        },
-      );
-      const createdOrder = await readPendingOrder(creationResponse, 201);
+          const [
+            orderRowsAfterConflict,
+            reservationsAfterConflict,
+            productAfterConflict,
+          ] = await Promise.all([
+            readOrderById(createdOrder.orderId),
+            readInventoryReservationsByOrderId(createdOrder.orderId),
+            readInventoryProduct(fixture.sku),
+          ]);
 
-      const conflictBody: OrderRequestBody = {
-        ...originalBody,
-        paymentToken: 'tok_declined',
-      };
-      const conflictResponse = await request.post(
-        'http://127.0.0.1:3001/orders',
-        {
-          headers: {
-            'Idempotency-Key': idempotencyKey,
-            'X-Correlation-Id': `correlation-${randomUUID()}`,
-          },
-          data: conflictBody,
-        },
-      );
+          expect(orderRowsAfterConflict).toHaveLength(1);
+          expect(orderRowsAfterConflict[0]).toMatchObject({
+            orderId: createdOrder.orderId,
+            status: 'INVENTORY_RESERVED',
+            inventoryReservationId,
+            paymentId: null,
+            failureCode: null,
+          });
+          expect(orderRowsAfterConflict[0]?.updatedAt.toISOString()).toBe(
+            createdUpdatedAt,
+          );
+          expect(reservationsAfterConflict).toHaveLength(1);
+          expect(reservationsAfterConflict).toEqual(createdReservations);
+          expect(reservationsAfterConflict[0]?.reservationId).toBe(
+            createdReservationId,
+          );
+          expect(productAfterConflict).toEqual(productAfterCreation);
 
-      expect(conflictBody).toEqual({
-        ...originalBody,
-        paymentToken: 'tok_declined',
+          if (conflictCase.changedField === 'sku') {
+            expect(
+              await countInventoryReservationsBySku(
+                String(conflictCase.changedValue),
+              ),
+            ).toBe(0);
+          }
+
+          const replayResponse = await request.post(
+            'http://127.0.0.1:3001/orders',
+            {
+              headers: {
+                'Idempotency-Key': idempotencyKey,
+                'X-Correlation-Id': replayCorrelationId,
+              },
+              data: originalBody,
+            },
+          );
+
+          expect(replayResponse.headers()['idempotent-replay']).toBe('true');
+          const replayedOrder = await readPendingOrder(
+            replayResponse,
+            200,
+            'INVENTORY_RESERVED',
+          );
+          expect(replayedOrder).toEqual(createdOrder);
+          expect(replayedOrder.orderId).toBe(createdOrder.orderId);
+          expect(replayedOrder.createdAt).toBe(createdOrder.createdAt);
+          expect(replayedOrder.status).toBe('INVENTORY_RESERVED');
+          expectSafeOrderBody(replayedOrder, idempotencyKey, [
+            creationCorrelationId,
+            conflictCorrelationId,
+            replayCorrelationId,
+            inventoryReservationId,
+            ...(conflictCase.changedField === 'paymentToken'
+              ? [String(conflictCase.changedValue)]
+              : []),
+          ]);
+
+          const [
+            orderRowsAfterReplay,
+            reservationsAfterReplay,
+            productAfterReplay,
+            orderCountAfterReplay,
+          ] = await Promise.all([
+            readOrderById(createdOrder.orderId),
+            readInventoryReservationsByOrderId(createdOrder.orderId),
+            readInventoryProduct(fixture.sku),
+            countOrdersByIdempotencyKey(idempotencyKey),
+          ]);
+
+          expect(orderCountAfterReplay).toBe(1);
+          expect(orderRowsAfterReplay).toHaveLength(1);
+          expect(orderRowsAfterReplay[0]).toMatchObject({
+            orderId: createdOrder.orderId,
+            status: 'INVENTORY_RESERVED',
+            inventoryReservationId,
+            paymentId: null,
+            failureCode: null,
+          });
+          expect(orderRowsAfterReplay[0]?.updatedAt.toISOString()).toBe(
+            createdUpdatedAt,
+          );
+          expect(reservationsAfterReplay).toHaveLength(1);
+          expect(reservationsAfterReplay).toEqual(createdReservations);
+          expect(reservationsAfterReplay[0]?.reservationId).toBe(
+            createdReservationId,
+          );
+          expect(productAfterReplay).toEqual(productAfterCreation);
+        } finally {
+          await cleanupOrderInventoryFixture({
+            idempotencyKey,
+            sku: fixture.sku,
+            totalQuantity: fixture.totalQuantity,
+          });
+
+          const [remainingOrders, remainingReservations, restoredProduct] =
+            await Promise.all([
+              countOrdersByIdempotencyKey(idempotencyKey),
+              countInventoryReservationsBySku(fixture.sku),
+              readInventoryProduct(fixture.sku),
+            ]);
+
+          expect(remainingOrders).toBe(0);
+          expect(remainingReservations).toBe(0);
+          expect(restoredProduct).toEqual({
+            sku: fixture.sku,
+            totalQuantity: fixture.totalQuantity,
+            reservedQuantity: 0,
+            availableQuantity: fixture.totalQuantity,
+          });
+        }
       });
-      await expectIdempotencyConflict(conflictResponse, [
-        idempotencyKey,
-        originalBody.paymentToken,
-        conflictBody.paymentToken,
-      ]);
-      await expectOriginalOrderReplay(
-        request,
-        idempotencyKey,
-        originalBody,
-        createdOrder,
-      );
-    });
+    }
   });
 
   test.describe('request validation', () => {
