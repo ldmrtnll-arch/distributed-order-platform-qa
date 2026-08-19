@@ -54,6 +54,11 @@ export default defineConfig({
     {
       command: 'node --import tsx services/order-service/src/server.ts',
       cwd: repositoryRoot,
+      env: {
+        ...process.env,
+        INVENTORY_SERVICE_URL: 'http://127.0.0.1:3002',
+        INVENTORY_REQUEST_TIMEOUT_MS: '2000',
+      },
       port: 3001,
       reuseExistingServer: false,
       timeout: 30_000,
