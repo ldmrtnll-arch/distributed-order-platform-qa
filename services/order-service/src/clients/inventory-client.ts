@@ -24,6 +24,23 @@ export type InventoryReservationResult =
   | { kind: 'reserved'; reservation: InventoryReservation }
   | { kind: 'rejected'; failureCode: InventoryRejectionCode };
 
+export interface InventoryReleaseRequest {
+  reservationId: string;
+  orderId: string;
+  sku: string;
+  quantity: number;
+  correlationId: string;
+}
+
+export interface ReleasedInventoryReservation {
+  reservationId: string;
+  orderId: string;
+  sku: string;
+  quantity: number;
+  status: 'RELEASED';
+  releasedAt: string;
+}
+
 export class InventoryUnavailableError extends Error {
   readonly errorCode: string;
 
@@ -94,6 +111,23 @@ function isInsufficientStock(
   );
 }
 
+function isValidRelease(
+  value: unknown,
+  request: InventoryReleaseRequest,
+): value is ReleasedInventoryReservation {
+  if (!isRecord(value)) return false;
+
+  return (
+    value.reservationId === request.reservationId &&
+    value.orderId === request.orderId &&
+    value.sku === request.sku &&
+    value.quantity === request.quantity &&
+    value.status === 'RELEASED' &&
+    typeof value.releasedAt === 'string' &&
+    !Number.isNaN(Date.parse(value.releasedAt))
+  );
+}
+
 export async function reserveInventory(
   request: InventoryReservationRequest,
 ): Promise<InventoryReservationResult> {
@@ -150,4 +184,40 @@ export async function reserveInventory(
   }
 
   throw new InventoryUnavailableError('INVENTORY_RESPONSE_UNAVAILABLE');
+}
+
+export async function releaseInventory(
+  request: InventoryReleaseRequest,
+): Promise<ReleasedInventoryReservation> {
+  let response: Response;
+
+  try {
+    response = await fetch(
+      `${environment.inventoryServiceUrl}/reservations/${request.reservationId}/release`,
+      {
+        method: 'POST',
+        headers: {
+          'Idempotency-Key': `order:${request.orderId}:inventory-release`,
+          'X-Correlation-Id': request.correlationId,
+        },
+        signal: AbortSignal.timeout(environment.inventoryRequestTimeoutMs),
+      },
+    );
+  } catch {
+    throw new InventoryUnavailableError('INVENTORY_RELEASE_REQUEST_FAILED');
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new InventoryUnavailableError('INVENTORY_RELEASE_RESPONSE_INVALID');
+  }
+
+  const isReleased = response.status === 200;
+  if (!isReleased || !isValidRelease(body, request)) {
+    throw new InventoryUnavailableError('INVENTORY_RELEASE_UNAVAILABLE');
+  }
+
+  return body;
 }
