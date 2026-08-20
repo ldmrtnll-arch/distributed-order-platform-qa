@@ -1,61 +1,51 @@
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 
-export interface ObservedInventoryRequest {
+export interface ObservedPaymentRequest {
   body: string;
   headers: IncomingHttpHeaders;
   method: string | undefined;
   url: string | undefined;
 }
 
-export interface InventoryMockResponse {
+interface PaymentMockResponse {
   body: unknown;
   delayMs?: number;
   status: number;
 }
 
-type InventoryMockResponseResolver = (
-  request: ObservedInventoryRequest,
-) => InventoryMockResponse | Promise<InventoryMockResponse>;
-
-export interface InventoryMockServer {
-  requests: () => readonly ObservedInventoryRequest[];
+export interface PaymentMockServer {
+  requests: () => readonly ObservedPaymentRequest[];
   stop: () => Promise<void>;
 }
 
-export async function startInventoryMockServer({
-  port = 3002,
+export async function startPaymentMockServer({
+  port = 3003,
   response,
 }: {
   port?: number;
-  response: InventoryMockResponse | InventoryMockResponseResolver;
-}): Promise<InventoryMockServer> {
-  const observedRequests: ObservedInventoryRequest[] = [];
+  response: PaymentMockResponse;
+}): Promise<PaymentMockServer> {
+  const observedRequests: ObservedPaymentRequest[] = [];
   const pendingTimers = new Set<NodeJS.Timeout>();
   const server: Server = createServer((request, serverResponse) => {
     const bodyChunks: Buffer[] = [];
 
     request.on('data', (chunk: Buffer) => bodyChunks.push(chunk));
-    request.on('end', async () => {
-      const observedRequest = {
+    request.on('end', () => {
+      observedRequests.push({
         body: Buffer.concat(bodyChunks).toString('utf8'),
         headers: request.headers,
         method: request.method,
         url: request.url,
-      };
-      observedRequests.push(observedRequest);
-
-      const configuredResponse =
-        typeof response === 'function'
-          ? await response(observedRequest)
-          : response;
+      });
 
       const sendResponse = (): void => {
-        serverResponse.statusCode = configuredResponse.status;
+        serverResponse.statusCode = response.status;
         serverResponse.setHeader('Content-Type', 'application/json');
-        serverResponse.end(JSON.stringify(configuredResponse.body));
+        serverResponse.end(JSON.stringify(response.body));
       };
 
-      if (configuredResponse.delayMs === undefined) {
+      if (response.delayMs === undefined) {
         sendResponse();
         return;
       }
@@ -63,7 +53,7 @@ export async function startInventoryMockServer({
       const timer = setTimeout(() => {
         pendingTimers.delete(timer);
         if (!serverResponse.destroyed) sendResponse();
-      }, configuredResponse.delayMs);
+      }, response.delayMs);
       pendingTimers.add(timer);
     });
   });

@@ -64,6 +64,41 @@ export const orderInventoryFixtures = {
     name: 'Order Resilience Invalid Contract Test Product',
     totalQuantity: 20,
   },
+  paymentDeclined: {
+    sku: 'ORDER-PAYMENT-DECLINED-001',
+    name: 'Order Payment Declined Test Product',
+    totalQuantity: 20,
+  },
+  paymentMethodRejected: {
+    sku: 'ORDER-PAYMENT-REJECTED-001',
+    name: 'Order Payment Method Rejected Test Product',
+    totalQuantity: 20,
+  },
+  paymentUnavailable: {
+    sku: 'ORDER-PAYMENT-RESILIENCE-001',
+    name: 'Order Payment Resilience Test Product',
+    totalQuantity: 20,
+  },
+  paymentTimeout: {
+    sku: 'ORDER-PAYMENT-TIMEOUT-001',
+    name: 'Order Payment Timeout Test Product',
+    totalQuantity: 20,
+  },
+  paymentInvalidContract: {
+    sku: 'ORDER-PAYMENT-INVALID-CONTRACT-001',
+    name: 'Order Payment Invalid Contract Test Product',
+    totalQuantity: 20,
+  },
+  paymentUnexpectedStatus: {
+    sku: 'ORDER-PAYMENT-UNEXPECTED-STATUS-001',
+    name: 'Order Payment Unexpected Status Test Product',
+    totalQuantity: 20,
+  },
+  compensationFailed: {
+    sku: 'ORDER-COMPENSATION-FAILED-001',
+    name: 'Order Compensation Failed Test Product',
+    totalQuantity: 20,
+  },
   insufficientStock: {
     sku: 'ORDER-INSUFFICIENT-001',
     name: 'Order Insufficient Stock Test Product',

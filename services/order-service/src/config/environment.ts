@@ -62,4 +62,9 @@ export const environment = Object.freeze({
     'INVENTORY_REQUEST_TIMEOUT_MS',
     2000,
   ),
+  paymentServiceUrl: readUrl('PAYMENT_SERVICE_URL'),
+  paymentRequestTimeoutMs: readPositiveInteger(
+    'PAYMENT_REQUEST_TIMEOUT_MS',
+    2000,
+  ),
 });

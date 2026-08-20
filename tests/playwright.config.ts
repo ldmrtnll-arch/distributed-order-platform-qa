@@ -58,6 +58,8 @@ export default defineConfig({
         ...process.env,
         INVENTORY_SERVICE_URL: 'http://127.0.0.1:3002',
         INVENTORY_REQUEST_TIMEOUT_MS: '2000',
+        PAYMENT_SERVICE_URL: 'http://127.0.0.1:3003',
+        PAYMENT_REQUEST_TIMEOUT_MS: '2000',
       },
       port: 3001,
       reuseExistingServer: false,
