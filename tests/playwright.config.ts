@@ -67,5 +67,7 @@ export default defineConfig({
     },
   ],
   globalSetup: './support/global-setup.ts',
-  reporter: [['list']],
+  reporter: process.env.CI
+    ? [['line'], ['html', { open: 'never' }]]
+    : [['list']],
 });

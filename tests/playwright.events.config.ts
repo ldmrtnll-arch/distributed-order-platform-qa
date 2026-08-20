@@ -34,5 +34,7 @@ export default defineConfig({
     extraHTTPHeaders: { Accept: 'application/json' },
   },
   globalSetup: path.join(testsDirectory, 'support', 'events-global-setup.ts'),
-  reporter: [['list']],
+  reporter: process.env.CI
+    ? [['line'], ['html', { open: 'never' }]]
+    : [['list']],
 });

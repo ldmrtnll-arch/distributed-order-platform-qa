@@ -13,6 +13,9 @@
 * Correlation ID propagation from the producing HTTP request through Outbox, event, and Notification.
 * Recovery when RabbitMQ or Notification is unavailable, without replaying the client request.
 * API, database, contract, duplicate-delivery, poison-message, concurrency, and resilience coverage.
+* K6 smoke, moderate-load, and concurrent-idempotency scenarios with dedicated data and cross-database post-condition checks.
+* GitHub Actions for quality, normal API/database tests, event delivery, performance smoke, manual resilience, and manual full performance.
+* Consolidated test strategy, plan, traceability, risks, bug reports, performance results, and execution evidence.
 
 ## Current implementation boundary
 
@@ -40,6 +43,8 @@ Results executed on 2026-08-20 while finalizing Order events and Notification:
 
 The normal Playwright configuration excludes `tests/events/**` and `tests/resilience/**`. Messaging and infrastructure-failure suites use one worker because they control service ports and dependency availability.
 
+The finalization baseline and post-change results are consolidated in [Test Execution Report](test-execution-report.md). The measured local K6 smoke, load, and concurrency results, including thresholds and environment limitations, are in [Performance Report](performance-report.md). GitHub workflows are configured, but this document does not claim a remote result before GitHub executes them.
+
 ## Event delivery evidence
 
 * All four terminal states produce the matching version 1 event; recoverable states do not.
@@ -58,6 +63,7 @@ The normal Playwright configuration excludes `tests/events/**` and `tests/resili
 * The default Playwright config initially discovered the new exclusive event suites, causing port contention. `tests/events/**` is now excluded from the normal config and remains available through `npm run test:events`.
 * The existing Order database-outage test initially rejected the publisher's new sanitized `publish-order-events` log. Its operation whitelist was extended while retaining secret/stack checks.
 * Publisher shutdown originally closed the AMQP channel before an active poll completed. Shutdown now waits for the poll before closing its known resources.
+* Docker K6 initially could not reach the host on Windows because an explicit host-gateway alias replaced Docker Desktop's native mapping. The runner now uses native `host.docker.internal` on Windows and host networking on Linux.
 
 ## Decisions
 
@@ -68,9 +74,11 @@ The normal Playwright configuration excludes `tests/events/**` and `tests/resili
 * Invalid messages use `nack(requeue=false)` and the DLQ; transient database failures use requeue plus reconnect to avoid a hot loop.
 * Terminal event uniqueness is enforced by `order_outbox_events.aggregate_id UNIQUE` for the current one-terminal-event-per-Order model.
 * Only per-Order batch order is read deterministically; no global ordering is promised.
+* Laboratory thresholds are `http_req_failed < 1%`, functional checks and confirmed Orders above 99%, p95 below 750 ms, and p99 below 1500 ms; they are regression criteria, not production SLOs.
+* Resilience and the full K6 sequence are manually dispatched in CI because they are infrastructure-exclusive or intentionally heavier than pull-request feedback.
 
 ## Next steps
 
-1. Add performance scenarios with K6.
-2. Add CI/CD with GitHub Actions.
-3. Perform the final project review.
+1. Observe the first remote GitHub Actions runs and tune only evidence-based runner-specific issues.
+2. Use the documented suites and reports during portfolio review and technical interviews.
+3. Treat production observability, deployment, and external-provider integrations as future projects rather than expanding this QA portfolio branch.

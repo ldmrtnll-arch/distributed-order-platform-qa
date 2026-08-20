@@ -186,7 +186,19 @@ The normal Playwright suite covers stable API and database behavior in parallel.
 
 Coverage includes all four event types, schema-negative cases, real workflow delivery, replay, concurrency, duplicate delivery, poison messages, DLQ, consumer downtime, broker downtime, automatic recovery, correlation IDs, database constraints, sanitized logs, health, and selective cleanup.
 
-## 11. Trade-offs and scope boundaries
+## 11. Performance harness
+
+K6 exercises the confirmed Order flow at three levels: a five-request smoke test, a short ramped load, and concurrent pairs sharing one idempotency key. Each ordinary iteration has unique idempotency and correlation identifiers and uses dedicated `PERF-%` products, so it cannot consume functional fixtures.
+
+The portable Node runner prepares only dedicated data, starts all four services as owned child processes, waits on health endpoints, runs the pinned K6 Docker image, verifies aggregate consistency across the four databases, captures service logs, and performs selective cleanup in `finally`. Docker Desktop uses its native `host.docker.internal`; Linux runners use host networking.
+
+## 12. CI execution model
+
+The main GitHub Actions workflow runs static quality, the normal API/database suite, the event suite, and K6 smoke on pull requests and pushes to `main`. Each runtime job receives its own GitHub-hosted runner, starts the Compose infrastructure, waits for Docker health, uploads generated evidence, emits infrastructure diagnostics only on failure, and always stops Compose.
+
+Infrastructure-destructive resilience tests are intentionally serial in a manually dispatched workflow. The complete smoke/load/concurrency sequence is also manual, keeping pull-request feedback bounded while preserving reproducible deeper validation.
+
+## 13. Trade-offs and scope boundaries
 
 Transactional Outbox was selected to eliminate the database/RabbitMQ dual-write gap with modest complexity. At-least-once delivery is accepted because the consumer has a simple durable uniqueness boundary. The DLQ prevents invalid messages from consuming retry capacity.
 
