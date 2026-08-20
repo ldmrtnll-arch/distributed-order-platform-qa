@@ -1,0 +1,48 @@
+name: Performance
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  performance:
+    name: K6 smoke, load, and concurrency
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Start test infrastructure
+        run: |
+          cp .env.example .env
+          docker compose up -d
+          npm run infra:wait
+      - run: npm run test:performance:smoke
+      - run: npm run test:performance:load
+      - run: npm run test:performance:concurrency
+      - name: Upload K6 summaries and service logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-performance-${{ github.run_attempt }}
+          path: artifacts/performance/
+          if-no-files-found: warn
+          retention-days: 10
+      - name: Infrastructure diagnostics
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --no-color
+      - name: Stop test infrastructure
+        if: always()
+        run: docker compose down
