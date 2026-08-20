@@ -17,6 +17,14 @@ function requireNonEmpty(name: string): string {
   return value;
 }
 
+function readNonEmpty(name: string, fallback: string): string {
+  const value = process.env[name] ?? fallback;
+  if (value.trim() === '') {
+    throw new Error(`Environment variable ${name} must not be blank.`);
+  }
+  return value.trim();
+}
+
 function readPort(name: string, fallback: number): number {
   const rawValue = process.env[name];
   if (rawValue === undefined || rawValue.trim() === '') return fallback;
@@ -43,8 +51,9 @@ function readPositiveInteger(name: string, fallback: number): number {
   return value;
 }
 
-function readUrl(name: string): string {
-  const rawValue = requireNonEmpty(name);
+function readUrl(name: string, fallback?: string): string {
+  const rawValue =
+    fallback === undefined ? requireNonEmpty(name) : readNonEmpty(name, fallback);
 
   try {
     const url = new URL(rawValue);
@@ -66,5 +75,14 @@ export const environment = Object.freeze({
   paymentRequestTimeoutMs: readPositiveInteger(
     'PAYMENT_REQUEST_TIMEOUT_MS',
     2000,
+  ),
+  rabbitMqUrl: readUrl(
+    'RABBITMQ_URL',
+    'amqp://qa_user:qa_password@127.0.0.1:5672/qa',
+  ),
+  orderEventsExchange: readNonEmpty('ORDER_EVENTS_EXCHANGE', 'order.events'),
+  orderEventPublishIntervalMs: readPositiveInteger(
+    'ORDER_EVENT_PUBLISH_INTERVAL_MS',
+    500,
   ),
 });

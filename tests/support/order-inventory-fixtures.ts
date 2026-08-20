@@ -99,6 +99,42 @@ export const orderInventoryFixtures = {
     name: 'Order Compensation Failed Test Product',
     totalQuantity: 20,
   },
+  eventConfirmed: {
+    sku: 'ORDER-EVENT-CONFIRMED-001',
+    name: 'Order Confirmed Event Test Product',
+    totalQuantity: 20,
+  },
+  eventInventoryRejected: {
+    sku: 'ORDER-EVENT-INVENTORY-REJECTED-001',
+    name: 'Order Inventory Rejected Event Test Product',
+    totalQuantity: 20,
+    seed: false,
+  },
+  eventPaymentDeclined: {
+    sku: 'ORDER-EVENT-PAYMENT-DECLINED-001',
+    name: 'Order Payment Declined Event Test Product',
+    totalQuantity: 20,
+  },
+  eventConcurrent: {
+    sku: 'ORDER-EVENT-CONCURRENT-001',
+    name: 'Order Concurrent Event Test Product',
+    totalQuantity: 20,
+  },
+  eventBrokerOutage: {
+    sku: 'ORDER-EVENT-BROKER-OUTAGE-001',
+    name: 'Order Broker Outage Event Test Product',
+    totalQuantity: 20,
+  },
+  eventNotificationDown: {
+    sku: 'ORDER-EVENT-NOTIFICATION-DOWN-001',
+    name: 'Order Notification Down Event Test Product',
+    totalQuantity: 20,
+  },
+  eventCompensationFailed: {
+    sku: 'ORDER-EVENT-COMPENSATION-FAILED-001',
+    name: 'Order Compensation Failed Event Test Product',
+    totalQuantity: 20,
+  },
   insufficientStock: {
     sku: 'ORDER-INSUFFICIENT-001',
     name: 'Order Insufficient Stock Test Product',

@@ -1,60 +1,70 @@
 # Distributed Order Platform QA
 
-Quality Assurance portfolio project for a distributed order-processing platform composed of REST APIs, independent PostgreSQL databases, and infrastructure prepared for asynchronous messaging.
+Quality Assurance portfolio project for a distributed order-processing platform composed of REST APIs, independent PostgreSQL databases, RabbitMQ messaging, and controlled failure scenarios.
 
 ## Project status
 
-The repository currently implements and tests the Inventory, Payment, and Order services. The active synchronous workflow reserves Inventory, processes Payment, confirms approved orders, and compensates Inventory after a business decline. RabbitMQ is available in the local infrastructure, but domain-event publishing and Notification Service remain future work.
+The repository implements and tests Inventory, Payment, Order, and Notification services. Order synchronously reserves Inventory, processes Payment, and compensates Inventory after a business decline. Every terminal Order transition also creates a versioned event in a transactional Outbox; a background publisher delivers it through RabbitMQ, and Notification consumes and persists it idempotently.
 
-See [System Architecture](docs/architecture.md) and [Project Status](docs/project-status.md) for the implemented scope and remaining work.
+See [System Architecture](docs/architecture.md) and [Project Status](docs/project-status.md) for design details and executed evidence.
 
-## Implemented Order workflow
+## Order workflow
 
-`POST /orders` persists an Order as `PENDING`, calls `POST /reservations`, and then calls `POST /payments`. Order propagates `X-Correlation-Id` and protects dependency calls with deterministic internal idempotency keys: `order:<orderId>:inventory-reservation`, `order:<orderId>:payment`, and `order:<orderId>:inventory-release`.
+`POST /orders` persists an Order as `PENDING`, calls Inventory and Payment over REST, propagates `X-Correlation-Id`, and uses deterministic internal idempotency keys. The terminal states and events are:
 
-The current state transitions are:
+| Order status | Event type | Routing key |
+| --- | --- | --- |
+| `CONFIRMED` | `ORDER_CONFIRMED` | `order.confirmed` |
+| `INVENTORY_REJECTED` | `ORDER_INVENTORY_REJECTED` | `order.inventory_rejected` |
+| `PAYMENT_DECLINED` | `ORDER_PAYMENT_DECLINED` | `order.payment_declined` |
+| `COMPENSATION_FAILED` | `ORDER_COMPENSATION_FAILED` | `order.compensation_failed` |
 
-* `PENDING -> INVENTORY_RESERVED` when Inventory creates or replays the reservation; this state remains recoverable while Payment is unfinished;
-* `PENDING -> INVENTORY_REJECTED` for terminal business outcomes: unknown SKU or insufficient stock;
-* `INVENTORY_RESERVED -> CONFIRMED` when Payment is approved;
-* `INVENTORY_RESERVED -> PAYMENT_DECLINED` after a Payment business decline and successful Inventory release;
-* `INVENTORY_RESERVED -> COMPENSATION_FAILED` when Payment is declined but Inventory release fails technically.
+`PENDING` and `INVENTORY_RESERVED` remain recoverable and do not produce terminal events. Replaying a terminal request returns the existing result without a second event. Conditional updates plus a database uniqueness constraint protect the same guarantee under concurrency.
 
-A client can recover a technical Inventory or Payment failure by replaying the same payload and external `Idempotency-Key`. The existing Order is reused, a new correlation ID may be supplied, and neither stock nor Payment is duplicated. There is no automatic dependency retry. `COMPENSATION_FAILED` is terminal in the current increment, and automatic compensation retry is not implemented yet.
+## Asynchronous delivery
 
-## Automated coverage
+The terminal status update and insertion into `order_outbox_events` commit in the same `orders_db` transaction. A non-blocking publisher reads pending rows in `created_at` order, publishes persistent messages with publisher confirms and mandatory routing, and only then sets `published_at`. Failures leave the row pending, increment `publish_attempts`, and store only a sanitized category.
 
-The Playwright suites cover:
+RabbitMQ uses the durable topic exchange `order.events`, durable queue `notification.order-events`, dead-letter exchange `order.events.dlx`, and durable DLQ `notification.order-events.dlq`. The publisher provisions this topology before sending, so an unroutable message is not silently considered successful.
 
-* Inventory, Payment, and Order API contracts;
-* idempotent replay and idempotency conflicts;
-* inventory business rejection and stock concurrency;
-* Order, Inventory, and Payment cross-database consistency;
-* Inventory and Payment dependency unavailability, timeout, unexpected responses, incompatible contracts, and recovery;
-* Payment-decline compensation and controlled compensation failure;
-* correlation-ID propagation and internal reservation, payment, and release idempotency;
-* validation, safe public errors, and database constraints.
+Notification validates the shared [Order event v1 schema](contracts/events/order-event.v1.schema.json) with Ajv before persistence. It uses manual acknowledgement after the database commit. Invalid messages are rejected without requeue and reach the DLQ; transient persistence failures are requeued and the consumer reconnects instead of creating a hot retry loop. A unique `event_id` makes duplicate delivery safe.
 
-Start the project infrastructure and run the normal suite with:
+## Running the project
+
+Start PostgreSQL and RabbitMQ:
 
 ```powershell
 npm run docker:up
+```
+
+Run the normal API/database suite:
+
+```powershell
 npm test
 ```
 
-Run the serialized Order resilience suite separately with:
+Run the serialized event and messaging suite, which controls service processes and RabbitMQ availability:
+
+```powershell
+npm run test:events
+```
+
+Run the existing resilience suites separately:
 
 ```powershell
 npm run test:resilience:order
+npm run test:resilience:inventory
+npm run test:resilience:payment
 ```
 
-Type-check every workspace with:
+Validate all workspaces:
 
 ```powershell
 npm run typecheck
+npm run build
 ```
 
-The Order resilience suite controls ports `3001`, `3002`, `3003`, and the mock-only port `3004`, and starts/stops only the service processes it creates. PostgreSQL and RabbitMQ must be healthy before execution.
+The normal suite intentionally excludes `tests/events/**` and `tests/resilience/**`. Those tests run serially because they take exclusive control of service ports or infrastructure availability. PostgreSQL and RabbitMQ must be healthy before they start, and their teardown restores the broker and stops only processes created by the tests.
 
 ## Technology
 
@@ -62,13 +72,16 @@ The Order resilience suite controls ports `3001`, `3002`, `3003`, and the mock-o
 * Express
 * Playwright
 * PostgreSQL
-* RabbitMQ
+* RabbitMQ with `amqplib`
+* JSON Schema and Ajv
 * Docker Compose
 
-## Main quality risks
+## Delivery semantics and trade-offs
 
-The project focuses on duplicate processing, inconsistent cross-service state, dependency failures, incompatible contracts, incorrect retry behavior, concurrency, missing traceability, and sensitive information in public responses or logs.
+Transactional Outbox avoids the inconsistent dual write in which an Order commits but its RabbitMQ publication is lost. Delivery is intentionally **at least once**, not exactly once; duplicates remain possible and are neutralized by `notifications.event_id UNIQUE`. Publisher confirms protect broker acceptance, mandatory routing protects queue delivery, and the DLQ prevents invalid messages from looping.
 
-## Scope boundary
+The current scope does not provide global event ordering, real e-mail or SMS, delayed queues, exponential backoff, complete distributed tracing, or automatic compensation retry. Ordering is deterministic for the publisher's pending batch, but ordering between different Orders is not guaranteed.
 
-RabbitMQ domain events, Notification Service, and automatic retry of failed compensation remain outside the current Order workflow. No real payment provider or financial transaction is used.
+## Security boundary
+
+Events and Notifications carry only the terminal business data and correlation ID needed by the consumer. They exclude payment tokens, external and internal idempotency keys, reservation/payment IDs, request fingerprints, credentials, connection strings, SQL, and stack traces. Health responses and normal structured logs do not expose infrastructure secrets.

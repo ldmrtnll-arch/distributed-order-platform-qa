@@ -451,7 +451,7 @@ test('returns 503 during a database outage and recovers without restarting', asy
     for (const errorLog of errorLogs) {
       expect(errorLog.service).toBe('order-service');
       expect(errorLog.operation).toMatch(
-        /^(?:postgres-pool|database-health-check)$/u,
+        /^(?:postgres-pool|database-health-check|publish-order-events)$/u,
       );
       expect(errorLog.message).toEqual(expect.any(String));
     }

@@ -34,6 +34,14 @@ export async function getRabbitMqStatus(): Promise<ComposeServiceStatus> {
   return getComposeServiceStatus('rabbitmq');
 }
 
+export async function stopRabbitMq(): Promise<void> {
+  await runDockerCompose(['stop', 'rabbitmq']);
+}
+
+export async function startRabbitMq(): Promise<void> {
+  await runDockerCompose(['start', 'rabbitmq']);
+}
+
 async function getComposeServiceStatus(
   service: string,
 ): Promise<ComposeServiceStatus> {

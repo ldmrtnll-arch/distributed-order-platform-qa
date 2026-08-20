@@ -44,7 +44,6 @@ export default async function globalSetup(): Promise<void> {
   ) {
     throw new Error('ORDER_DATABASE_URL is required for API tests.');
   }
-
   const databaseDirectory = path.join(
     repositoryRoot,
     'services',
@@ -114,6 +113,17 @@ export default async function globalSetup(): Promise<void> {
     ),
     'utf8',
   );
+  const orderOutboxMigration = await readFile(
+    path.join(
+      repositoryRoot,
+      'services',
+      'order-service',
+      'database',
+      'migrations',
+      '002_create_order_outbox_events.sql',
+    ),
+    'utf8',
+  );
 
   const inventoryClient = new Client({
     connectionString: inventoryConnectionString,
@@ -128,7 +138,9 @@ export default async function globalSetup(): Promise<void> {
 
     await inventoryClient.query('BEGIN');
 
-    const orderInventoryProducts = Object.values(orderInventoryFixtures);
+    const orderInventoryProducts = Object.values(orderInventoryFixtures).filter(
+      (product) => !('seed' in product) || product.seed !== false,
+    );
     const orderInventorySkus = orderInventoryProducts.map(
       (product) => product.sku,
     );
@@ -507,6 +519,7 @@ export default async function globalSetup(): Promise<void> {
   try {
     await orderClient.connect();
     await orderClient.query(orderMigration);
+    await orderClient.query(orderOutboxMigration);
     await orderClient.query('DELETE FROM orders');
   } finally {
     await orderClient.end();

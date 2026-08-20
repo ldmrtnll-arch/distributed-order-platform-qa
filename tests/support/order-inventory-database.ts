@@ -3,6 +3,7 @@ import {
   queryOrderDatabase,
 } from './database.js';
 import { cleanupPaymentsByOrderIds } from './order-payment-database.js';
+import { cleanupNotificationsByOrderIds } from './notification-database.js';
 
 interface CountRow {
   count: number;
@@ -176,6 +177,7 @@ export async function cleanupOrderByIdempotencyKey(
   );
   await Promise.all([
     cleanupPaymentsByOrderIds(orders.map((order) => order.orderId)),
+    cleanupNotificationsByOrderIds(orders.map((order) => order.orderId)),
     queryOrderDatabase(
       `DELETE FROM orders
        WHERE idempotency_key = $1`,
@@ -202,6 +204,7 @@ export async function cleanupOrderInventoryFixture({
 
   await Promise.all([
     cleanupPaymentsByOrderIds(orders.map((order) => order.orderId)),
+    cleanupNotificationsByOrderIds(orders.map((order) => order.orderId)),
     queryOrderDatabase(
       `DELETE FROM orders
        WHERE idempotency_key = $1`,

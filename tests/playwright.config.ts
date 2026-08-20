@@ -24,7 +24,7 @@ process.env.no_proxy = [process.env.no_proxy, localAddresses]
 
 export default defineConfig({
   testDir: '.',
-  testIgnore: '**/resilience/**',
+  testIgnore: ['**/resilience/**', '**/events/**'],
   fullyParallel: true,
   forbidOnly: true,
   retries: 0,

@@ -3,6 +3,8 @@ import type { PoolClient } from 'pg';
 
 import type { OrderRequest } from '../validation/order.js';
 import type { InventoryRejectionCode } from '../clients/inventory-client.js';
+import type { TerminalOrderStatus } from '../events/order-event.js';
+import { insertTerminalOrderEvent } from './order-outbox.js';
 import { orderDatabasePool } from './pool.js';
 
 export interface Order {
@@ -250,212 +252,213 @@ export async function markInventoryReserved(
 export async function markInventoryRejected(
   orderId: string,
   failureCode: InventoryRejectionCode,
+  correlationId: string,
 ): Promise<OrderTransitionResult> {
-  const updatedResult = await orderDatabasePool.query<OrderRow>(
-    `UPDATE orders
-     SET status = 'INVENTORY_REJECTED',
-         inventory_reservation_id = NULL,
-         payment_id = NULL,
-         failure_code = $2,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE order_id = $1
-       AND status = 'PENDING'
-     RETURNING
-       order_id AS "orderId",
-       sku,
-       quantity,
-       amount AS "amountInCents",
-       currency,
-       status,
-       inventory_reservation_id AS "inventoryReservationId",
-       payment_id AS "paymentId",
-       failure_code AS "failureCode",
-       request_fingerprint AS "requestFingerprint",
-       created_at AS "createdAt"`,
-    [orderId, failureCode],
-  );
-  const updatedOrder = updatedResult.rows[0];
-
-  if (updatedOrder !== undefined) {
-    return { kind: 'updated', state: mapOrderState(updatedOrder) };
-  }
-
-  const currentResult = await orderDatabasePool.query<OrderRow>(
-    `SELECT
-       order_id AS "orderId",
-       sku,
-       quantity,
-       amount AS "amountInCents",
-       currency,
-       status,
-       inventory_reservation_id AS "inventoryReservationId",
-       payment_id AS "paymentId",
-       failure_code AS "failureCode",
-       request_fingerprint AS "requestFingerprint",
-       created_at AS "createdAt"
-     FROM orders
-     WHERE order_id = $1`,
-    [orderId],
-  );
-  const currentOrder = currentResult.rows[0];
-
-  if (
-    currentOrder !== undefined &&
-    currentOrder.status === 'INVENTORY_REJECTED' &&
-    currentOrder.failureCode === failureCode
-  ) {
-    return { kind: 'already-updated', state: mapOrderState(currentOrder) };
-  }
-
-  return { kind: 'state-conflict' };
+  return transitionToTerminalState({
+    orderId,
+    targetStatus: 'INVENTORY_REJECTED',
+    correlationId,
+    updateSql: `UPDATE orders
+       SET status = 'INVENTORY_REJECTED',
+           inventory_reservation_id = NULL,
+           payment_id = NULL,
+           failure_code = $2,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE order_id = $1
+         AND status = 'PENDING'
+       RETURNING
+         order_id AS "orderId",
+         sku,
+         quantity,
+         amount AS "amountInCents",
+         currency,
+         status,
+         inventory_reservation_id AS "inventoryReservationId",
+         payment_id AS "paymentId",
+         failure_code AS "failureCode",
+         request_fingerprint AS "requestFingerprint",
+         created_at AS "createdAt"`,
+    updateParameters: [orderId, failureCode],
+    isAlreadyUpdated: (state) => state.failureCode === failureCode,
+  });
 }
 
-async function readOrderState(orderId: string): Promise<OrderState | null> {
-  const currentResult = await orderDatabasePool.query<OrderRow>(
-    `SELECT
-       order_id AS "orderId",
-       sku,
-       quantity,
-       amount AS "amountInCents",
-       currency,
-       status,
-       inventory_reservation_id AS "inventoryReservationId",
-       payment_id AS "paymentId",
-       failure_code AS "failureCode",
-       request_fingerprint AS "requestFingerprint",
-       created_at AS "createdAt"
-     FROM orders
-     WHERE order_id = $1`,
-    [orderId],
-  );
+async function transitionToTerminalState({
+  orderId,
+  targetStatus,
+  correlationId,
+  updateSql,
+  updateParameters,
+  isAlreadyUpdated,
+}: {
+  orderId: string;
+  targetStatus: TerminalOrderStatus;
+  correlationId: string;
+  updateSql: string;
+  updateParameters: readonly unknown[];
+  isAlreadyUpdated: (state: OrderState) => boolean;
+}): Promise<OrderTransitionResult> {
+  const client = await orderDatabasePool.connect();
 
-  const currentOrder = currentResult.rows[0];
-  return currentOrder === undefined ? null : mapOrderState(currentOrder);
+  try {
+    await client.query('BEGIN');
+    const updatedResult = await client.query<OrderRow>(updateSql, [
+      ...updateParameters,
+    ]);
+    const updatedOrder = updatedResult.rows[0];
+
+    if (updatedOrder !== undefined) {
+      await insertTerminalOrderEvent(
+        client,
+        {
+          orderId: updatedOrder.orderId,
+          status: targetStatus,
+          sku: updatedOrder.sku,
+          quantity: updatedOrder.quantity,
+          amountInCents: updatedOrder.amountInCents,
+          currency: updatedOrder.currency,
+          failureCode: updatedOrder.failureCode,
+        },
+        correlationId,
+      );
+      await client.query('COMMIT');
+      return { kind: 'updated', state: mapOrderState(updatedOrder) };
+    }
+
+    const currentResult = await client.query<OrderRow>(
+      `SELECT
+         order_id AS "orderId",
+         sku,
+         quantity,
+         amount AS "amountInCents",
+         currency,
+         status,
+         inventory_reservation_id AS "inventoryReservationId",
+         payment_id AS "paymentId",
+         failure_code AS "failureCode",
+         request_fingerprint AS "requestFingerprint",
+         created_at AS "createdAt"
+       FROM orders
+       WHERE order_id = $1`,
+      [orderId],
+    );
+    await client.query('COMMIT');
+    const currentOrder = currentResult.rows[0];
+    if (currentOrder === undefined || currentOrder.status !== targetStatus) {
+      return { kind: 'state-conflict' };
+    }
+
+    const state = mapOrderState(currentOrder);
+    return isAlreadyUpdated(state)
+      ? { kind: 'already-updated', state }
+      : { kind: 'state-conflict' };
+  } catch (error) {
+    await rollback(client);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function markPaymentConfirmed(
   orderId: string,
   paymentId: string,
+  correlationId: string,
 ): Promise<OrderTransitionResult> {
-  const updatedResult = await orderDatabasePool.query<OrderRow>(
-    `UPDATE orders
-     SET status = 'CONFIRMED',
-         payment_id = $2,
-         failure_code = NULL,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE order_id = $1
-       AND status = 'INVENTORY_RESERVED'
-     RETURNING
-       order_id AS "orderId",
-       sku,
-       quantity,
-       amount AS "amountInCents",
-       currency,
-       status,
-       inventory_reservation_id AS "inventoryReservationId",
-       payment_id AS "paymentId",
-       failure_code AS "failureCode",
-       request_fingerprint AS "requestFingerprint",
-       created_at AS "createdAt"`,
-    [orderId, paymentId],
-  );
-  const updatedOrder = updatedResult.rows[0];
-  if (updatedOrder !== undefined) {
-    return { kind: 'updated', state: mapOrderState(updatedOrder) };
-  }
-
-  const current = await readOrderState(orderId);
-  if (
-    current?.order.status === 'CONFIRMED' &&
-    current.paymentId === paymentId
-  ) {
-    return { kind: 'already-updated', state: current };
-  }
-  return { kind: 'state-conflict' };
+  return transitionToTerminalState({
+    orderId,
+    targetStatus: 'CONFIRMED',
+    correlationId,
+    updateSql: `UPDATE orders
+       SET status = 'CONFIRMED',
+           payment_id = $2,
+           failure_code = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE order_id = $1
+         AND status = 'INVENTORY_RESERVED'
+       RETURNING
+         order_id AS "orderId",
+         sku,
+         quantity,
+         amount AS "amountInCents",
+         currency,
+         status,
+         inventory_reservation_id AS "inventoryReservationId",
+         payment_id AS "paymentId",
+         failure_code AS "failureCode",
+         request_fingerprint AS "requestFingerprint",
+         created_at AS "createdAt"`,
+    updateParameters: [orderId, paymentId],
+    isAlreadyUpdated: (state) => state.paymentId === paymentId,
+  });
 }
 
 export async function markPaymentDeclined(
   orderId: string,
   paymentId: string,
   failureCode: string,
+  correlationId: string,
 ): Promise<OrderTransitionResult> {
-  const updatedResult = await orderDatabasePool.query<OrderRow>(
-    `UPDATE orders
-     SET status = 'PAYMENT_DECLINED',
-         payment_id = $2,
-         failure_code = $3,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE order_id = $1
-       AND status = 'INVENTORY_RESERVED'
-     RETURNING
-       order_id AS "orderId",
-       sku,
-       quantity,
-       amount AS "amountInCents",
-       currency,
-       status,
-       inventory_reservation_id AS "inventoryReservationId",
-       payment_id AS "paymentId",
-       failure_code AS "failureCode",
-       request_fingerprint AS "requestFingerprint",
-       created_at AS "createdAt"`,
-    [orderId, paymentId, failureCode],
-  );
-  const updatedOrder = updatedResult.rows[0];
-  if (updatedOrder !== undefined) {
-    return { kind: 'updated', state: mapOrderState(updatedOrder) };
-  }
-
-  const current = await readOrderState(orderId);
-  if (
-    current?.order.status === 'PAYMENT_DECLINED' &&
-    current.paymentId === paymentId &&
-    current.failureCode === failureCode
-  ) {
-    return { kind: 'already-updated', state: current };
-  }
-  return { kind: 'state-conflict' };
+  return transitionToTerminalState({
+    orderId,
+    targetStatus: 'PAYMENT_DECLINED',
+    correlationId,
+    updateSql: `UPDATE orders
+       SET status = 'PAYMENT_DECLINED',
+           payment_id = $2,
+           failure_code = $3,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE order_id = $1
+         AND status = 'INVENTORY_RESERVED'
+       RETURNING
+         order_id AS "orderId",
+         sku,
+         quantity,
+         amount AS "amountInCents",
+         currency,
+         status,
+         inventory_reservation_id AS "inventoryReservationId",
+         payment_id AS "paymentId",
+         failure_code AS "failureCode",
+         request_fingerprint AS "requestFingerprint",
+         created_at AS "createdAt"`,
+    updateParameters: [orderId, paymentId, failureCode],
+    isAlreadyUpdated: (state) =>
+      state.paymentId === paymentId && state.failureCode === failureCode,
+  });
 }
 
 export async function markCompensationFailed(
   orderId: string,
   paymentId: string,
+  correlationId: string,
 ): Promise<OrderTransitionResult> {
   const failureCode = 'INVENTORY_COMPENSATION_FAILED';
-  const updatedResult = await orderDatabasePool.query<OrderRow>(
-    `UPDATE orders
-     SET status = 'COMPENSATION_FAILED',
-         payment_id = $2,
-         failure_code = $3,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE order_id = $1
-       AND status = 'INVENTORY_RESERVED'
-     RETURNING
-       order_id AS "orderId",
-       sku,
-       quantity,
-       amount AS "amountInCents",
-       currency,
-       status,
-       inventory_reservation_id AS "inventoryReservationId",
-       payment_id AS "paymentId",
-       failure_code AS "failureCode",
-       request_fingerprint AS "requestFingerprint",
-       created_at AS "createdAt"`,
-    [orderId, paymentId, failureCode],
-  );
-  const updatedOrder = updatedResult.rows[0];
-  if (updatedOrder !== undefined) {
-    return { kind: 'updated', state: mapOrderState(updatedOrder) };
-  }
-
-  const current = await readOrderState(orderId);
-  if (
-    current?.order.status === 'COMPENSATION_FAILED' &&
-    current.paymentId === paymentId &&
-    current.failureCode === failureCode
-  ) {
-    return { kind: 'already-updated', state: current };
-  }
-  return { kind: 'state-conflict' };
+  return transitionToTerminalState({
+    orderId,
+    targetStatus: 'COMPENSATION_FAILED',
+    correlationId,
+    updateSql: `UPDATE orders
+       SET status = 'COMPENSATION_FAILED',
+           payment_id = $2,
+           failure_code = $3,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE order_id = $1
+         AND status = 'INVENTORY_RESERVED'
+       RETURNING
+         order_id AS "orderId",
+         sku,
+         quantity,
+         amount AS "amountInCents",
+         currency,
+         status,
+         inventory_reservation_id AS "inventoryReservationId",
+         payment_id AS "paymentId",
+         failure_code AS "failureCode",
+         request_fingerprint AS "requestFingerprint",
+         created_at AS "createdAt"`,
+    updateParameters: [orderId, paymentId, failureCode],
+    isAlreadyUpdated: (state) =>
+      state.paymentId === paymentId && state.failureCode === failureCode,
+  });
 }

@@ -142,6 +142,7 @@ ordersRouter.post('/orders', async (request, response) => {
           await markInventoryRejected(
             state.order.orderId,
             inventoryResult.failureCode,
+            correlationId,
           ),
         );
         if (rejectedState === null) {
@@ -231,6 +232,7 @@ ordersRouter.post('/orders', async (request, response) => {
         await markPaymentConfirmed(
           state.order.orderId,
           paymentResult.payment.paymentId,
+          correlationId,
         ),
       );
       if (confirmedState === null) {
@@ -257,6 +259,7 @@ ordersRouter.post('/orders', async (request, response) => {
         await markCompensationFailed(
           state.order.orderId,
           paymentResult.payment.paymentId,
+          correlationId,
         ),
       );
       if (compensationState === null) {
@@ -291,6 +294,7 @@ ordersRouter.post('/orders', async (request, response) => {
         state.order.orderId,
         paymentResult.payment.paymentId,
         paymentResult.payment.declineCode,
+        correlationId,
       ),
     );
     if (declinedState === null) {
