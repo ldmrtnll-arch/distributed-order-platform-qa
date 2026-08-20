@@ -38,7 +38,7 @@ Each consistency count matched across confirmed Orders, approved Payments, reser
 | Inventory resilience | 2 passed in 17.6s |
 | Payment resilience | 1 passed in 8.9s |
 
-The normal and event command strings match the CI workflow. Playwright HTML generation is configured only for CI with `open: never`; the remote Node 22/Linux execution has not yet occurred and no green GitHub result is claimed.
+The normal and event command strings match the CI workflow. Playwright HTML generation is configured only for CI with `open: never`.
 
 ## CI test-isolation correction
 
@@ -55,7 +55,23 @@ Local isolation validation after the correction:
 | Typecheck after correction | 5 workspaces passed |
 | Build after correction | 5 workspaces passed |
 
-These are local results only. The remote CI status remains pending until the workflow triggered by the corrective push completes.
+The corrective pull-request workflow subsequently passed in GitHub Actions, as confirmed by the project owner. No remote run ID, duration, or timestamp is recorded because those values were not supplied.
+
+## Final portfolio audit
+
+| Validation | Local result |
+| --- | --- |
+| `npm ci` / `npm audit` | 118 packages installed; 0 vulnerabilities |
+| Typecheck | 5 workspaces passed |
+| Build | 5 workspaces passed |
+| Normal Playwright | 123 passed in 4.8s |
+| Events, including contracts | 21 passed in 17.2s |
+| Order resilience | 10 passed in 25.7s |
+| Inventory resilience | 2 passed in 17.7s |
+| Payment resilience | 1 passed in 9.0s |
+| K6 smoke | 5/5 iterations; 20/20 checks; 0.00% HTTP errors; consistency 5/5 across all stages |
+
+GitHub Actions final pull-request run: passed. The automatic workflow covers typecheck/build, normal API/database tests, event tests, and K6 smoke. Resilience and the complete performance sequence remain manual workflows.
 
 ## Evidence handling
 

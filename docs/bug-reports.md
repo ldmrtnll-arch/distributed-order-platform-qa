@@ -76,15 +76,15 @@ Only defects observed during implementation are recorded. Classification disting
 * **Expected:** The 123 completed tests are summarized and the process exits.
 * **Observed:** All 123 tests completed, but the process remained open until its known execution session was interrupted; the same suite with the line reporter exited in 4.6 seconds.
 * **Cause:** Not proven; isolated to local Node 24 CI/artifact mode rather than service behavior or functional tests.
-* **Correction:** CI is pinned to Node 22/Linux and configures HTML with `open: never`; remote behavior must be confirmed by the first workflow run.
-* **Status:** Open validation risk; it does not justify claiming a remote green run.
+* **Correction:** CI is pinned to Node 22/Linux and configures HTML with `open: never`; the final pull-request workflow completed successfully in that environment.
+* **Status:** Mitigated for CI; local Node 24 multiple-reporter mode remains a tooling limitation.
 
 ## BUG-TEST-004 - Normal Playwright suite depended on Notification schema created by the events suite
 
 * **Classification/severity:** Test infrastructure / CI, high.
 * **Environment:** GitHub Actions API and database tests on a clean PostgreSQL runner.
-* **Observed:** The normal suite reported 110 passed and 13 failed; every failure ended during Order fixture cleanup with `relation "notifications" does not exist`.
-* **Cause:** Order cleanup removes related Notifications, but the normal global setup did not guarantee that `notifications_db` existed or apply the Notification Service migration.
+* **Observed:** Local execution passed, but the GitHub Actions fresh runner reported 110 passed and 13 failed; every failure ended during Order fixture cleanup with `relation "notifications" does not exist`.
+* **Cause:** A hidden test-suite state dependency: Order cleanup removes related Notifications, but the normal global setup did not guarantee that `notifications_db` existed or apply the Notification Service migration.
 * **Why local execution passed:** Earlier event or performance runs had already created and migrated the local Notification database.
 * **Correction:** The normal global setup now reuses the shared database-creation helper, applies the official Notification migration, and establishes a clean Notification baseline.
 * **Prevention:** Every CI suite must initialize all schemas used by its own helpers instead of depending on state left by another suite or runner.
