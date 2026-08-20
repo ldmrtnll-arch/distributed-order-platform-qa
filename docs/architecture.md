@@ -2,536 +2,201 @@
 
 ## 1. Purpose
 
-This document describes the planned architecture of the Distributed Order Platform used in this Quality Assurance portfolio project.
+The Distributed Order Platform is a testable distributed e-commerce workflow. It combines synchronous REST orchestration with asynchronous terminal Order events, independent service databases, idempotency, compensation, controlled outages, and distributed traceability.
 
-The application will simulate a distributed e-commerce order workflow involving synchronous REST communication, asynchronous events, independent service data, partial failures, retries, idempotency, and distributed traceability.
+The implemented services are Inventory, Payment, Order, and Notification. PostgreSQL hosts four independently owned logical databases, while RabbitMQ transports terminal Order events.
 
-The architecture is intentionally designed to expose realistic integration risks that can be investigated through manual and automated testing.
-
-> Current implementation boundary: Inventory, Payment, and Order are implemented as independent services. Order orchestrates Inventory reservation, Payment, and Inventory release compensation through synchronous REST. RabbitMQ events and Notification Service remain planned.
-
-## 2. Architecture Style
-
-The platform will use a hybrid orchestration architecture.
-
-The `order-service` will coordinate the main order workflow through synchronous REST requests to the inventory and payment services.
-
-Each service will also publish domain events to RabbitMQ. Final order events will be consumed by the notification service.
-
-This approach allows the project to test both synchronous and asynchronous communication without making the implementation too large for a junior-level portfolio project.
-
-## 3. System Context
+## 2. System context
 
 ```mermaid
-flowchart LR
-    Client[API Client or Automated Test]
+flowchart TD
+    Client[API Client or Playwright]
+    Order[Order Service :3001]
+    Inventory[Inventory Service :3002]
+    Payment[Payment Service :3003]
+    Notification[Notification Service :3004]
+    OrdersDB[(orders_db)]
+    InventoryDB[(inventory_db)]
+    PaymentsDB[(payments_db)]
+    Outbox[(order_outbox_events)]
+    RabbitMQ[(RabbitMQ order.events)]
+    NotificationsDB[(notifications_db)]
 
-    Order[Order Service]
-    Inventory[Inventory Service]
-    Payment[Payment Service]
-    Notification[Notification Service]
-
-    RabbitMQ[(RabbitMQ)]
-
-    OrdersDB[(Orders Database)]
-    InventoryDB[(Inventory Database)]
-    PaymentsDB[(Payments Database)]
-    NotificationsDB[(Notifications Database)]
-
-    Client -->|REST| Order
-
-    Order -->|REST reservation request| Inventory
-    Order -->|REST payment request| Payment
-
-    Order -->|Order events| RabbitMQ
-    Inventory -->|Inventory events| RabbitMQ
-    Payment -->|Payment events| RabbitMQ
-
-    RabbitMQ -->|Final order events| Notification
-
+    Client -->|POST /orders| Order
+    Order -->|REST reserve/release| Inventory
+    Order -->|REST process| Payment
     Order --> OrdersDB
     Inventory --> InventoryDB
     Payment --> PaymentsDB
+    OrdersDB --> Outbox
+    Outbox -->|background publisher| RabbitMQ
+    RabbitMQ -->|notification.order-events| Notification
     Notification --> NotificationsDB
 ```
 
-## 4. Planned Components
+Order orchestrates the business workflow. Notification is consumer-driven and exposes only `GET /health`; tests validate its persisted state directly in its owned database.
 
-### 4.1 Order Service
+## 3. Synchronous Order workflow
 
-The Order Service will be the entry point for creating and consulting orders.
-
-Implemented responsibilities in the current increment:
-
-* accept order creation requests;
-* validate the initial order payload;
-* prevent duplicate order creation using an idempotency key;
-* persist the order and its current status;
-* request an inventory reservation;
-* request Payment after a successful reservation;
-* release Inventory after a Payment business decline;
-* propagate the correlation ID to all dependency calls;
-* distinguish terminal business outcomes from recoverable technical failures;
-* persist conditional, atomic workflow transitions.
-
-Event publication and order-query endpoints remain planned.
-
-Endpoints:
-
-| Method | Endpoint           | Purpose                              | Status      |
-| ------ | ------------------ | ------------------------------------ | ----------- |
-| `POST` | `/orders`          | Create and process the Order workflow | Implemented |
-| `GET`  | `/orders/:orderId` | Retrieve an order                    | Planned     |
-| `GET`  | `/health`          | Check service health                 | Implemented |
-
-Order statuses used by the implemented workflow:
-
-* `PENDING`
-* `INVENTORY_RESERVED`
-* `INVENTORY_REJECTED`
-* `CONFIRMED`
-* `PAYMENT_DECLINED`
-* `COMPENSATION_FAILED`
-
-### 4.2 Inventory Service
-
-The Inventory Service will manage products, available quantities, and reservations.
-
-Implemented responsibilities:
-
-* verify whether a product exists;
-* verify whether the requested quantity is available;
-* create an inventory reservation;
-* prevent duplicate reservations for the same order;
-* release a reservation when compensation is required;
-* expose inventory and reservation data for validation.
-
-Inventory event publication remains planned.
-
-Implemented endpoints:
-
-| Method | Endpoint                               | Purpose                        |
-| ------ | -------------------------------------- | ------------------------------ |
-| `GET`  | `/inventory/:sku`                      | Retrieve product stock         |
-| `POST` | `/reservations`                        | Reserve inventory for an order |
-| `POST` | `/reservations/:reservationId/release` | Release an order reservation   |
-| `GET`  | `/health`                              | Check service health           |
-
-Initial reservation statuses:
-
-* `RESERVED`
-* `RELEASED`
-* `REJECTED`
-
-### 4.3 Payment Service
-
-The Payment Service will simulate payment processing.
-
-Implemented responsibilities:
-
-* receive payment requests;
-* apply deterministic payment approval and rejection rules;
-* prevent duplicate charges using an idempotency key;
-* store payment attempts and their results;
-* return business rejections separately from technical failures;
-* expose payment data for validation;
-* support idempotent calls orchestrated by Order.
-
-Payment event publication remains planned.
-
-Endpoints:
-
-| Method | Endpoint             | Purpose                      | Status      |
-| ------ | -------------------- | ---------------------------- | ----------- |
-| `POST` | `/payments`          | Process an order payment     | Implemented |
-| `GET`  | `/payments/:orderId` | Retrieve payment information | Planned     |
-| `GET`  | `/health`            | Check service health         | Implemented |
-
-Initial payment statuses:
-
-* `APPROVED`
-* `DECLINED`
-* `FAILED`
-
-No real payment provider or real financial transaction will be used.
-
-### 4.4 Notification Service
-
-The Notification Service will consume final order events asynchronously.
-
-Planned responsibilities:
-
-* consume confirmed and cancelled order events;
-* create a notification record;
-* avoid processing the same event more than once;
-* preserve the event and correlation identifiers;
-* retry transient consumer failures;
-* route unprocessable messages to a dead-letter queue;
-* expose stored notifications for test validation.
-
-Planned endpoints:
-
-| Method | Endpoint                  | Purpose                             |
-| ------ | ------------------------- | ----------------------------------- |
-| `GET`  | `/notifications/:orderId` | Retrieve notifications for an order |
-| `GET`  | `/health`                 | Check service health                |
-
-## 5. Main Order Flow
-
-### 5.1 Implemented synchronous Order workflow
-
-The implemented flow persists the Order as `PENDING`, reserves Inventory, and processes Payment. Dependency calls use deterministic internal idempotency keys and propagate the current request's `X-Correlation-Id`.
+`POST /orders` first persists `PENDING`. Order reserves Inventory and, after success, persists `INVENTORY_RESERVED` before processing Payment. Requests propagate `X-Correlation-Id` and use deterministic internal idempotency keys for reservation, payment, and release.
 
 ```mermaid
 sequenceDiagram
     participant Client
-    participant Order as Order Service
+    participant Order
     participant OrdersDB as orders_db
-    participant Inventory as Inventory Service
-    participant InventoryDB as inventory_db
-    participant Payment as Payment Service
-    participant PaymentsDB as payments_db
+    participant Inventory
+    participant Payment
 
     Client->>Order: POST /orders
-    Order->>OrdersDB: Persist PENDING
+    Order->>OrdersDB: INSERT PENDING
     Order->>Inventory: POST /reservations
-    Inventory->>InventoryDB: Create idempotent reservation
-    Inventory-->>Order: Reserved or business rejection
-    Order->>OrdersDB: Persist INVENTORY_RESERVED
-    Order->>Payment: POST /payments
-    Payment->>PaymentsDB: Persist idempotent Payment
-    Payment-->>Order: APPROVED or DECLINED
-    alt Payment approved
-        Order->>OrdersDB: Persist CONFIRMED
-    else Payment declined
-        Order->>Inventory: POST /reservations/:id/release
-        Inventory->>InventoryDB: Release reservation and restore stock
-        Order->>OrdersDB: Persist PAYMENT_DECLINED
+    alt Inventory business rejection
+        Order->>OrdersDB: UPDATE INVENTORY_REJECTED + INSERT Outbox (one transaction)
+    else Inventory reserved
+        Order->>OrdersDB: UPDATE INVENTORY_RESERVED
+        Order->>Payment: POST /payments
+        alt Payment approved
+            Order->>OrdersDB: UPDATE CONFIRMED + INSERT Outbox (one transaction)
+        else Payment declined
+            Order->>Inventory: POST /reservations/:id/release
+            alt Release succeeds
+                Order->>OrdersDB: UPDATE PAYMENT_DECLINED + INSERT Outbox (one transaction)
+            else Release fails
+                Order->>OrdersDB: UPDATE COMPENSATION_FAILED + INSERT Outbox (one transaction)
+            end
+        end
     end
-    Order-->>Client: Order response
+    Order-->>Client: terminal or recoverable response
 ```
 
-The state semantics are:
+`PENDING` and `INVENTORY_RESERVED` are recoverable and do not create terminal events. Inventory or Payment technical failures preserve those states for external idempotent replay. `INVENTORY_REJECTED`, `CONFIRMED`, `PAYMENT_DECLINED`, and `COMPENSATION_FAILED` are terminal.
 
-* `PENDING`: the Inventory stage is unfinished and remains recoverable;
-* `INVENTORY_RESERVED`: Inventory is reserved, Payment is unfinished, and the Order remains recoverable;
-* `INVENTORY_REJECTED`: terminal recognized Inventory business outcome;
-* `CONFIRMED`: terminal state with reserved Inventory and approved Payment;
-* `PAYMENT_DECLINED`: terminal state with a persisted declined Payment and released Inventory;
-* `COMPENSATION_FAILED`: terminal state for this increment when the Payment declined but Inventory release failed.
+## 4. Transactional Outbox
 
-An Inventory technical failure returns `ORDER_INVENTORY_UNAVAILABLE` while preserving `PENDING`. A Payment technical failure returns `ORDER_PAYMENT_UNAVAILABLE` while preserving `INVENTORY_RESERVED`; replay resumes directly at Payment without reserving stock again. Correlation ID is excluded from the request fingerprint, so recovery can use a new value. The Order Service makes one dependency request per workflow step and has no automatic retry.
-
-### 5.2 Future event-enabled successful order
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Order as Order Service
-    participant Inventory as Inventory Service
-    participant Payment as Payment Service
-    participant Broker as RabbitMQ
-    participant Notification as Notification Service
-
-    Client->>Order: POST /orders
-    Order->>Order: Store order as PENDING
-
-    Order->>Inventory: POST /reservations
-    Inventory->>Inventory: Reserve available stock
-    Inventory-->>Order: Reservation accepted
-    Inventory->>Broker: inventory.reserved
-
-    Order->>Payment: POST /payments
-    Payment->>Payment: Process payment
-    Payment-->>Order: Payment approved
-    Payment->>Broker: payment.approved
-
-    Order->>Order: Update order to CONFIRMED
-    Order->>Broker: order.confirmed
-    Order-->>Client: Confirmed order response
-
-    Broker->>Notification: Deliver order.confirmed
-    Notification->>Notification: Store notification
-```
-
-Expected final state:
-
-* order status is `CONFIRMED`;
-* inventory remains reserved;
-* payment status is `APPROVED`;
-* an `order.confirmed` event exists;
-* a confirmation notification is created;
-* the same correlation ID can be traced across the operation.
-
-### 5.3 Inventory Rejection
-
-In the implemented Inventory stage, a recognized business rejection behaves as follows:
-
-1. The order is initially stored.
-2. Inventory reports an unknown SKU or insufficient stock.
-3. Payment must not be requested.
-4. The order is updated to `INVENTORY_REJECTED` with the public failure code.
-
-Cancellation events and notifications remain planned.
-
-### 5.4 Payment Decline
-
-When payment is declined:
-
-1. Inventory is successfully reserved.
-2. Payment returns a business decline.
-3. The order service requests the release of the reservation.
-4. Inventory is restored.
-5. The order is updated to terminal `PAYMENT_DECLINED` with the Payment decline code.
-
-If release fails technically, the Order becomes terminal `COMPENSATION_FAILED`, the reservation may remain `RESERVED`, and the client receives a controlled `503 ORDER_COMPENSATION_FAILED`. Automatic compensation retry is not implemented yet. Decline and cancellation events remain planned.
-
-### 5.5 Technical Failure
-
-For a technical Inventory failure:
-
-1. The Order remains `PENDING`.
-2. The client receives a safe `503 ORDER_INVENTORY_UNAVAILABLE` response.
-3. No automatic retry is performed in the same request.
-4. Recovery reuses the original payload and external `Idempotency-Key`.
-5. Inventory's internal idempotency key prevents duplicate stock reservation.
-6. Cross-database validation confirms one Order, one reservation, and one stock increment.
-
-For a technical Payment failure, the Order remains `INVENTORY_RESERVED`, the Inventory reservation is preserved, and no Payment row is assumed to exist. Replaying the original payload and external idempotency key continues directly at Payment and reaches `CONFIRMED` without a second reservation.
-
-## 6. Synchronous Communication
-
-REST APIs will be used for synchronous communication.
-
-Planned request headers:
-
-| Header             | Purpose                                           |
-| ------------------ | ------------------------------------------------- |
-| `Content-Type`     | Defines the request media type                    |
-| `Accept`           | Defines the expected response media type          |
-| `X-Correlation-Id` | Identifies the complete distributed operation     |
-| `Idempotency-Key`  | Prevents duplicate processing of retried requests |
-
-The `X-Correlation-Id` received by the Order Service is currently propagated to:
-
-* Inventory reservation requests;
-* Payment requests;
-* Inventory release requests;
-* structured logs for the relevant request.
-
-Propagation to RabbitMQ events and Notification remains planned.
-
-When the client does not provide a correlation ID, the Order Service will generate one.
-
-## 7. Asynchronous Communication
-
-RabbitMQ will be used for asynchronous domain events.
-
-Planned exchange:
+Publishing directly after a database commit creates an unsafe dual write: the Order can commit while RabbitMQ publication fails. Instead, each conditional terminal update and its `order_outbox_events` insert use the same PostgreSQL client and transaction:
 
 ```text
-order.events
+BEGIN
+UPDATE orders ... WHERE current state is expected
+INSERT order_outbox_events ...
+COMMIT
 ```
 
-Planned routing keys:
+If either statement fails, both roll back. A foreign key keeps the event tied to its Order, while `UNIQUE (aggregate_id)` enforces the current rule of one terminal event per Order even during replay or concurrency.
 
-* `order.created`
-* `inventory.reserved`
-* `inventory.rejected`
-* `inventory.released`
-* `payment.approved`
-* `payment.declined`
-* `payment.failed`
-* `order.confirmed`
-* `order.cancelled`
+The Outbox stores the versioned payload, event and aggregate IDs, correlation ID, creation/publication timestamps, attempt count, and a sanitized error category. It never stores broker credentials or stack traces.
 
-A common event envelope will be used:
+## 5. Event contract
+
+The executable contract is [order-event.v1.schema.json](../contracts/events/order-event.v1.schema.json). Notification compiles this exact JSON Schema with Ajv in strict mode before consuming messages.
 
 ```json
 {
-  "eventId": "uuid",
-  "eventType": "order.confirmed",
+  "eventId": "UUID",
+  "eventType": "ORDER_CONFIRMED",
   "eventVersion": 1,
-  "occurredAt": "2026-08-05T12:00:00.000Z",
-  "correlationId": "uuid",
-  "aggregateId": "order-uuid",
-  "source": "order-service",
-  "data": {}
+  "occurredAt": "2026-08-20T12:00:00.000Z",
+  "correlationId": "correlation-value",
+  "orderId": "UUID",
+  "data": {
+    "status": "CONFIRMED",
+    "sku": "ORDER-EVENT-CONFIRMED-001",
+    "quantity": 2,
+    "amountInCents": 5990,
+    "currency": "BRL",
+    "failureCode": null
+  }
 }
 ```
 
-Important event validations will include:
+The four allowed mappings are:
 
-* required fields;
-* correct data types;
-* supported event version;
-* valid identifiers;
-* correct routing key;
-* correlation ID propagation;
-* compatibility with JSON Schema;
-* duplicate event handling;
-* retry behavior;
-* dead-letter routing.
+| Event type | Required status | Failure code |
+| --- | --- | --- |
+| `ORDER_CONFIRMED` | `CONFIRMED` | `null` |
+| `ORDER_INVENTORY_REJECTED` | `INVENTORY_REJECTED` | final Inventory business code |
+| `ORDER_PAYMENT_DECLINED` | `PAYMENT_DECLINED` | final Payment decline code |
+| `ORDER_COMPENSATION_FAILED` | `COMPENSATION_FAILED` | `INVENTORY_COMPENSATION_FAILED` |
 
-## 8. Data Ownership
+The envelope intentionally excludes payment tokens, external/internal idempotency keys, reservation/payment IDs, request fingerprints, credentials, and connection details.
 
-Each service will own its data.
+## 6. RabbitMQ topology and publisher
 
-For local development, a single PostgreSQL container may host multiple logical databases:
+The durable topology is:
 
-* `orders_db`
-* `inventory_db`
-* `payments_db`
-* `notifications_db`
+| Resource | Name/type |
+| --- | --- |
+| Exchange | `order.events`, topic, durable |
+| Routing keys | `order.confirmed`, `order.inventory_rejected`, `order.payment_declined`, `order.compensation_failed` |
+| Consumer queue | `notification.order-events`, durable |
+| Dead-letter exchange | `order.events.dlx`, topic, durable |
+| Dead-letter queue | `notification.order-events.dlq`, durable |
 
-Services must not directly modify another service's database.
+The Order background publisher is non-blocking at HTTP startup. It reads a small pending batch ordered by `created_at ASC, event_id ASC`, provisions the topology, and publishes persistent messages with `mandatory: true` on a confirm channel. Only a positive publisher confirm without a returned message marks `published_at`.
 
-Automated database tests may connect directly to databases for validation, but this access is for testing and investigation only.
+Broker, publish, or routing failure keeps the row pending, increments `publish_attempts`, stores one of `BROKER_UNAVAILABLE`, `PUBLISH_FAILED`, or `UNROUTABLE_MESSAGE`, closes stale resources, and retries on the configured interval. RabbitMQ downtime therefore does not make Order unhealthy and does not turn a completed business request into `503`.
 
-This separation allows the project to validate:
+Shutdown stops scheduling, lets the active poll finish, then closes the known channel and connection before the database pool.
 
-* service data ownership;
-* eventual consistency;
-* cross-service inconsistencies;
-* compensation results;
-* duplicate records;
-* missing records;
-* correct database constraints.
+## 7. Notification consumer
 
-## 9. Idempotency
+Notification connects with manual acknowledgements and `prefetch(1)`:
 
-Idempotency is required for operations that may be retried.
+```text
+delivery -> JSON parse -> JSON Schema validation -> BEGIN
+         -> INSERT notification -> COMMIT -> ACK
+```
 
-Implemented examples:
+`notifications.event_id UNIQUE` is the idempotency boundary. A repeated valid `eventId` performs no second insert and is ACKed as a duplicate.
 
-* repeated `POST /orders` requests with the same `Idempotency-Key`;
-* repeated reservation requests for the same order;
-* repeated payment requests for the same order;
-* repeated Inventory release after a Payment decline.
+Malformed JSON or schema-invalid data receives `nack(requeue=false)` and is dead-lettered. It creates no Notification and does not stop later valid deliveries. A transient database error receives `nack(requeue=true)`; the consumer then closes its connection and reconnects after a bounded interval, avoiding an aggressive in-process hot loop.
 
-Repeated delivery of the same RabbitMQ event remains planned.
+Notification persists stable internal messages rather than sending real e-mail or SMS. `GET /health` returns `UP` only when both `notifications_db` and RabbitMQ are available and never exposes connection details.
 
-Expected behavior:
+## 8. Consistency and delivery semantics
 
-* the same logical operation is not executed twice;
-* no duplicate order is created;
-* stock is not reserved twice;
-* payment is not charged twice;
-* a notification is not created twice;
-* repeated requests return a consistent response;
-* conflicts between an idempotency key and a different payload are rejected.
+The platform guarantees:
 
-## 10. Retry, Timeout, and Recovery
+* atomic terminal Order state plus Outbox insertion;
+* durable broker topology and persistent messages;
+* publication state only after publisher confirm;
+* automatic retry/reconnect from persistent Outbox state;
+* at-least-once delivery;
+* idempotent Notification persistence by event ID;
+* poison-message isolation through the DLQ;
+* end-to-end correlation ID from the request that produced the terminal transition.
 
-Order dependency requests have configurable timeouts through `INVENTORY_REQUEST_TIMEOUT_MS` and `PAYMENT_REQUEST_TIMEOUT_MS`. The Order clients do not retry automatically. After a technical failure, `PENDING` resumes at Inventory and `INVENTORY_RESERVED` resumes at Payment through a new client request using the same external idempotency key and payload.
+It does not guarantee exactly-once delivery. A crash after RabbitMQ confirms but before `published_at` commits can publish the same event again, which is why consumer idempotency is mandatory. Pending events are read in creation order, but ordering between different Orders is not guaranteed.
 
-Future retry policies may apply only to transient failures, such as:
+## 9. Data ownership
 
-* network errors;
-* dependency timeouts;
-* selected HTTP `5xx` responses;
-* temporary RabbitMQ consumer failures.
+Each service owns one logical PostgreSQL database:
 
-Retries must not be applied blindly to:
+* Order owns `orders_db` and its Outbox;
+* Inventory owns `inventory_db`;
+* Payment owns `payments_db`;
+* Notification owns `notifications_db`.
 
-* invalid input;
-* authentication or authorization failures;
-* inventory rejection;
-* payment decline;
-* other deterministic business errors.
+Application services never write across database boundaries. Automated tests may query multiple databases only to verify distributed consistency. Test setup safely creates `notifications_db` when an existing Docker volume predates it, without destroying volumes.
 
-Retry and timeout values will be configurable so they can be tested without introducing unnecessary fixed waits.
+## 10. Test strategy
 
-RabbitMQ consumers will use acknowledgements and dead-letter handling so that failed messages are not silently lost.
+The normal Playwright suite covers stable API and database behavior in parallel. Event tests use a separate serial configuration because they start exact service PIDs, inspect eventual state by bounded polling, publish controlled RabbitMQ messages, and temporarily stop only the project's RabbitMQ container. Resilience tests are also separate because they require exclusive infrastructure control.
 
-## 11. Observability and Traceability
+Coverage includes all four event types, schema-negative cases, real workflow delivery, replay, concurrency, duplicate delivery, poison messages, DLQ, consumer downtime, broker downtime, automatic recovery, correlation IDs, database constraints, sanitized logs, health, and selective cleanup.
 
-Each service will produce structured logs.
+## 11. Trade-offs and scope boundaries
 
-Planned log fields:
+Transactional Outbox was selected to eliminate the database/RabbitMQ dual-write gap with modest complexity. At-least-once delivery is accepted because the consumer has a simple durable uniqueness boundary. The DLQ prevents invalid messages from consuming retry capacity.
 
-* timestamp;
-* log level;
-* service name;
-* operation;
-* correlation ID;
-* order ID, when available;
-* event ID, when available;
-* HTTP status or event result;
-* error type;
-* error message.
+The current scope deliberately excludes:
 
-Sensitive values, payment details, secrets, and credentials must not be written to logs.
-
-The project will validate that one order can be traced across services using the same correlation ID.
-
-## 12. Main Quality Risks
-
-The initial architecture introduces the following quality risks:
-
-1. Duplicate orders caused by client retries.
-2. Duplicate inventory reservations.
-3. Duplicate payment processing.
-4. Payment processing after inventory rejection.
-5. Reserved stock not released after payment decline.
-6. Order status inconsistent with inventory or payment data.
-7. Lost or duplicated RabbitMQ events.
-8. Notification created more than once.
-9. Unsupported event contract versions.
-10. Missing or changed response fields.
-11. Incorrect retry of business errors.
-12. Requests hanging because of missing timeouts.
-13. Missing correlation IDs between services.
-14. Sensitive information exposed in logs.
-15. Partial system availability producing inconsistent states.
-
-These risks will later be connected to test scenarios and test cases through a traceability matrix.
-
-## 13. Planned Testability Features
-
-The application will include features that make failures observable and reproducible:
-
-* deterministic payment test rules;
-* reusable seeded products;
-* health endpoints;
-* query endpoints for order, reservation, payment, and notification state;
-* configurable retry and timeout values;
-* structured logs;
-* correlation IDs;
-* idempotency keys;
-* RabbitMQ management interface;
-* isolated PostgreSQL databases;
-* Docker Compose environment;
-* database cleanup or reset scripts;
-* reusable automated test data.
-
-These features are part of the application design because software that cannot be observed or controlled is more difficult to test reliably.
-
-## 14. Scope Boundaries
-
-The first project version will not include:
-
-* a graphical web interface;
-* real credit card processing;
-* real customer personal information;
-* Kubernetes;
-* cloud infrastructure;
-* production-grade authentication;
-* multiple regions;
-* high-volume production performance targets.
-
-These items are outside the initial scope so the project can focus on integration quality, resilience, messaging, databases, and automated testing.
-
-## 15. Architecture Decisions Summary
-
-* The Order Service will orchestrate the main workflow.
-* REST will be used for synchronous dependency calls.
-* RabbitMQ will be used for domain events and notifications.
-* PostgreSQL will provide persistent service data.
-* Each service will own its logical database.
-* Idempotency will protect retryable operations.
-* Correlation IDs will provide distributed traceability.
-* Compensation will restore inventory after a failed payment.
-* RabbitMQ consumers will handle duplicates and failed messages.
-* All components will be executed locally through Docker Compose.
-* Implementation and test evidence will be added incrementally.
+* exactly-once delivery;
+* global ordering;
+* real e-mail, SMS, or external notification providers;
+* exponential backoff and delayed retry queues;
+* a Notification CRUD API;
+* full distributed tracing infrastructure;
+* automatic retry of failed Inventory compensation;
+* Kubernetes, cloud deployment, and production authentication.
