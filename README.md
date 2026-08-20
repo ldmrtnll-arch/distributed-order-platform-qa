@@ -1,87 +1,111 @@
 # Distributed Order Platform QA
 
-Quality Assurance portfolio project for a distributed order-processing platform composed of REST APIs, independent PostgreSQL databases, RabbitMQ messaging, and controlled failure scenarios.
+[![CI](https://github.com/ldmrtnll-arch/distributed-order-platform-qa/actions/workflows/ci.yml/badge.svg)](https://github.com/ldmrtnll-arch/distributed-order-platform-qa/actions/workflows/ci.yml)
 
-## Project status
+## Overview
 
-The repository implements and tests Inventory, Payment, Order, and Notification services. Order synchronously reserves Inventory, processes Payment, and compensates Inventory after a business decline. Every terminal Order transition also creates a versioned event in a transactional Outbox; a background publisher delivers it through RabbitMQ, and Notification consumes and persists it idempotently.
+Portfolio project for testing a distributed order-processing platform. It demonstrates QA Automation across REST APIs, independent databases, synchronous microservice integration, asynchronous events, controlled failures, performance, and CI/CD.
 
-See [System Architecture](docs/architecture.md) and [Project Status](docs/project-status.md) for design details and executed evidence.
+The badge reflects GitHub's live result. The workflows are configured in this repository; no remote run is claimed by the documentation itself.
 
-## Order workflow
+## Architecture
 
-`POST /orders` persists an Order as `PENDING`, calls Inventory and Payment over REST, propagates `X-Correlation-Id`, and uses deterministic internal idempotency keys. The terminal states and events are:
+The client calls Order, which synchronously reserves Inventory and processes Payment. Every terminal Order transition creates an event in a transactional Outbox. A background publisher sends it through RabbitMQ and Notification validates and persists it idempotently.
 
-| Order status | Event type | Routing key |
-| --- | --- | --- |
-| `CONFIRMED` | `ORDER_CONFIRMED` | `order.confirmed` |
-| `INVENTORY_REJECTED` | `ORDER_INVENTORY_REJECTED` | `order.inventory_rejected` |
-| `PAYMENT_DECLINED` | `ORDER_PAYMENT_DECLINED` | `order.payment_declined` |
-| `COMPENSATION_FAILED` | `ORDER_COMPENSATION_FAILED` | `order.compensation_failed` |
+```text
+Client
+  |
+Order -------- Inventory ---- inventory_db
+  |
+  |   -------- Payment ------ payments_db
+  |
+  +---- orders_db / Outbox
+                  |
+               RabbitMQ
+                  |
+              Notification --- notifications_db
+```
 
-`PENDING` and `INVENTORY_RESERVED` remain recoverable and do not produce terminal events. Replaying a terminal request returns the existing result without a second event. Conditional updates plus a database uniqueness constraint protect the same guarantee under concurrency.
+See [System Architecture](docs/architecture.md) for state transitions, delivery semantics, topology, and trade-offs.
 
-## Asynchronous delivery
+## Quality scope
 
-The terminal status update and insertion into `order_outbox_events` commit in the same `orders_db` transaction. A non-blocking publisher reads pending rows in `created_at` order, publishes persistent messages with publisher confirms and mandatory routing, and only then sets `published_at`. Failures leave the row pending, increment `publish_attempts`, and store only a sanitized category.
+* API contracts, validation, error safety, headers, and status codes;
+* PostgreSQL constraints and cross-database consistency;
+* idempotent replay and concurrent requests;
+* Inventory rejection, Payment decline, and compensation;
+* JSON Schema event contracts and correlation IDs;
+* Transactional Outbox, at-least-once delivery, duplicate consumption, ACK/NACK, and DLQ;
+* database, dependency, consumer, and RabbitMQ resilience;
+* K6 smoke, moderate load, and concurrency/idempotency performance;
+* GitHub Actions quality, functional, event, resilience, and performance pipelines.
 
-RabbitMQ uses the durable topic exchange `order.events`, durable queue `notification.order-events`, dead-letter exchange `order.events.dlx`, and durable DLQ `notification.order-events.dlq`. The publisher provisions this topology before sending, so an unroutable message is not silently considered successful.
+## Technologies
 
-Notification validates the shared [Order event v1 schema](contracts/events/order-event.v1.schema.json) with Ajv before persistence. It uses manual acknowledgement after the database commit. Invalid messages are rejected without requeue and reach the DLQ; transient persistence failures are requeued and the consumer reconnects instead of creating a hot retry loop. A unique `event_id` makes duplicate delivery safe.
+TypeScript, Node.js, Express, Playwright, PostgreSQL, RabbitMQ, Docker Compose, JSON Schema/Ajv, K6, and GitHub Actions.
 
-## Running the project
+## Commands
 
-Start PostgreSQL and RabbitMQ:
+Start infrastructure and wait for real health checks:
 
-```powershell
+```text
 npm run docker:up
+npm run infra:wait
 ```
 
-Run the normal API/database suite:
+Static and functional validation:
 
-```powershell
-npm test
-```
-
-Run the serialized event and messaging suite, which controls service processes and RabbitMQ availability:
-
-```powershell
-npm run test:events
-```
-
-Run the existing resilience suites separately:
-
-```powershell
-npm run test:resilience:order
-npm run test:resilience:inventory
-npm run test:resilience:payment
-```
-
-Validate all workspaces:
-
-```powershell
+```text
 npm run typecheck
 npm run build
+npm test
+npm run test:events
+npm run test:resilience
 ```
 
-The normal suite intentionally excludes `tests/events/**` and `tests/resilience/**`. Those tests run serially because they take exclusive control of service ports or infrastructure availability. PostgreSQL and RabbitMQ must be healthy before they start, and their teardown restores the broker and stops only processes created by the tests.
+Performance validation requires Docker but no global K6 installation:
 
-## Technology
+```text
+npm run test:performance:smoke
+npm run test:performance:load
+npm run test:performance:concurrency
+```
 
-* Node.js and TypeScript with ES Modules/NodeNext
-* Express
-* Playwright
-* PostgreSQL
-* RabbitMQ with `amqplib`
-* JSON Schema and Ajv
-* Docker Compose
+Dedicated data commands are available as `performance:prepare`, `performance:verify`, and `performance:cleanup`. Stop infrastructure with `npm run docker:down` when it is no longer needed.
 
-## Delivery semantics and trade-offs
+## Test suites
 
-Transactional Outbox avoids the inconsistent dual write in which an Order commits but its RabbitMQ publication is lost. Delivery is intentionally **at least once**, not exactly once; duplicates remain possible and are neutralized by `notifications.event_id UNIQUE`. Publisher confirms protect broker acceptance, mandatory routing protects queue delivery, and the DLQ prevents invalid messages from looping.
+| Suite | Purpose | Execution model |
+| --- | --- | --- |
+| Normal | API and database behavior | Parallel Playwright workers |
+| Events | Contracts, E2E delivery, duplicates, DLQ, broker/consumer recovery | Serial, controlled processes |
+| Resilience | PostgreSQL and dependency outages | Serial aggregate; infrastructure exclusive |
+| Performance | Smoke, paced load, concurrent idempotent pairs | Docker K6; dedicated `PERF-%` data |
 
-The current scope does not provide global event ordering, real e-mail or SMS, delayed queues, exponential backoff, complete distributed tracing, or automatic compensation retry. Ordering is deterministic for the publisher's pending batch, but ordering between different Orders is not guaranteed.
+The performance runner starts ports 3001–3004 itself, polls health, checks eventual consistency, stops only its child processes, and cleans its records and RabbitMQ queues in `finally`.
 
-## Security boundary
+## CI/CD
 
-Events and Notifications carry only the terminal business data and correlation ID needed by the consumer. They exclude payment tokens, external and internal idempotency keys, reservation/payment IDs, request fingerprints, credentials, connection strings, SQL, and stack traces. Health responses and normal structured logs do not expose infrastructure secrets.
+* `ci.yml` runs typecheck/build, normal Playwright, event tests, and K6 smoke on pull requests and pushes to `main`.
+* `resilience.yml` runs the three destructive resilience suites serially through manual dispatch.
+* `performance.yml` runs smoke, load, and concurrency through manual dispatch.
+
+Jobs use Node 22, `npm ci`, Docker Compose health polling, explicit timeouts, cancellation of superseded runs, failure-only infrastructure diagnostics, and unconditional Compose cleanup. Browser binaries are not installed because Playwright is used only as an API runner.
+
+## Reports
+
+Playwright HTML reports and generated K6 summaries/service logs are uploaded as GitHub Actions artifacts for 10 days. Generated local output under `artifacts/`, `playwright-report/`, and `test-results/` is ignored by Git.
+
+Consolidated evidence is available in:
+
+* [Performance Report](docs/performance-report.md)
+* [Test Execution Report](docs/test-execution-report.md)
+* [Test Strategy](docs/test-strategy.md)
+* [Test Plan](docs/test-plan.md)
+* [Traceability Matrix](docs/traceability-matrix.md)
+* [Risks and Limitations](docs/risks-and-limitations.md)
+* [Bug Reports](docs/bug-reports.md)
+
+## Known limitations
+
+The project does not claim production capacity or exactly-once delivery. It has no global event ordering, exponential-backoff/delay queues, real payment provider, real e-mail/SMS, automatic compensation retry, full distributed tracing, authentication, cloud deployment, or multi-node PostgreSQL/RabbitMQ. All performance results describe one local laboratory environment only.

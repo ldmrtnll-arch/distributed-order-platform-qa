@@ -46,16 +46,16 @@ The latency margins account for local/CI virtualization while remaining below th
 
 | Metric | Smoke | Load | Concurrency |
 | --- | ---: | ---: | ---: |
-| HTTP requests | 5 | 222 | 30 |
-| Requests/s | 23.21 | 6.28 | 153.97 |
-| Iterations | 5 | 222 | 15 pairs |
-| Checks | 20/20 | 888/888 | 60/60 |
+| HTTP requests | 5 | 224 | 30 |
+| Requests/s | 21.00 | 6.33 | 164.53 |
+| Iterations | 5 | 224 | 15 pairs |
+| Checks | 20/20 | 896/896 | 60/60 |
 | HTTP error rate | 0.00% | 0.00% | 0.00% |
-| Duration average | 42.24 ms | 33.51 ms | 60.43 ms |
-| p90 | 63.11 ms | 41.82 ms | 120.57 ms |
-| p95 | 72.98 ms | 44.26 ms | 122.08 ms |
-| p99 | 80.87 ms | 48.61 ms | 126.03 ms |
-| Maximum | 82.85 ms | 87.79 ms | 127.22 ms |
+| Duration average | 46.97 ms | 30.23 ms | 56.78 ms |
+| p90 | 75.76 ms | 41.53 ms | 115.87 ms |
+| p95 | 86.21 ms | 43.58 ms | 116.77 ms |
+| p99 | 94.57 ms | 45.55 ms | 118.02 ms |
+| Maximum | 96.66 ms | 84.06 ms | 118.35 ms |
 | Interrupted iterations | 0 | 0 | 0 |
 | Dropped iterations | Not emitted by these executors | Not emitted by this executor | Not emitted by this executor |
 
@@ -68,7 +68,7 @@ The runner polled after K6 until the asynchronous workflow converged:
 | Scenario | Confirmed Orders | Approved Payments | Reserved reservations | Published Outbox | Notifications |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Smoke | 5 | 5 | 5 | 5 | 5 |
-| Load | 222 | 222 | 222 | 222 | 222 |
+| Load | 224 | 224 | 224 | 224 | 224 |
 | Concurrency | 15 | 15 | 15 | 15 | 15 |
 
 Concurrency sent 30 HTTP requests but persisted 15 business operations, proving the observed idempotency result.
