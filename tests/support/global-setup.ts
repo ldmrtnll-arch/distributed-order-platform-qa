@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from 'pg';
 
+import { ensureNotificationDatabase } from './ensure-notification-database.js';
 import { orderInventoryFixtures } from './order-inventory-fixtures.js';
 
 const testsDirectory = path.resolve(
@@ -25,6 +26,7 @@ export default async function globalSetup(): Promise<void> {
   const inventoryConnectionString = process.env.INVENTORY_DATABASE_URL;
   const paymentConnectionString = process.env.PAYMENT_DATABASE_URL;
   const orderConnectionString = process.env.ORDER_DATABASE_URL;
+  const notificationConnectionString = process.env.NOTIFICATION_DATABASE_URL;
 
   if (
     inventoryConnectionString === undefined ||
@@ -43,6 +45,12 @@ export default async function globalSetup(): Promise<void> {
     orderConnectionString.trim() === ''
   ) {
     throw new Error('ORDER_DATABASE_URL is required for API tests.');
+  }
+  if (
+    notificationConnectionString === undefined ||
+    notificationConnectionString.trim() === ''
+  ) {
+    throw new Error('NOTIFICATION_DATABASE_URL is required for API tests.');
   }
   const databaseDirectory = path.join(
     repositoryRoot,
@@ -124,6 +132,19 @@ export default async function globalSetup(): Promise<void> {
     ),
     'utf8',
   );
+  const notificationMigration = await readFile(
+    path.join(
+      repositoryRoot,
+      'services',
+      'notification-service',
+      'database',
+      'migrations',
+      '001_create_notifications.sql',
+    ),
+    'utf8',
+  );
+
+  await ensureNotificationDatabase(notificationConnectionString);
 
   const inventoryClient = new Client({
     connectionString: inventoryConnectionString,
@@ -523,5 +544,17 @@ export default async function globalSetup(): Promise<void> {
     await orderClient.query('DELETE FROM orders');
   } finally {
     await orderClient.end();
+  }
+
+  const notificationClient = new Client({
+    connectionString: notificationConnectionString,
+  });
+
+  try {
+    await notificationClient.connect();
+    await notificationClient.query(notificationMigration);
+    await notificationClient.query('DELETE FROM notifications');
+  } finally {
+    await notificationClient.end();
   }
 }

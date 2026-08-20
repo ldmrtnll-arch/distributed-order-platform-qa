@@ -40,6 +40,23 @@ Each consistency count matched across confirmed Orders, approved Payments, reser
 
 The normal and event command strings match the CI workflow. Playwright HTML generation is configured only for CI with `open: never`; the remote Node 22/Linux execution has not yet occurred and no green GitHub result is claimed.
 
+## CI test-isolation correction
+
+The first remote CI run exposed a test-isolation issue: the API and database job finished with 110 passed and 13 Order cleanup failures because the clean runner had no `notifications` table. The normal global setup now creates `notifications_db` when needed and applies the official Notification Service migration without starting the Notification Service.
+
+Local isolation validation after the correction:
+
+| Order | Result |
+| --- | --- |
+| Fresh Notification database -> `npm test` | 123 passed in 4.9s |
+| Immediate second `npm test` | 123 passed in 4.7s |
+| `npm run test:events` -> `npm test` | 21 passed in 17.2s; 123 passed in 4.7s |
+| `npm test` -> `npm run test:events` | 123 passed in 4.7s; 21 passed in 17.5s |
+| Typecheck after correction | 5 workspaces passed |
+| Build after correction | 5 workspaces passed |
+
+These are local results only. The remote CI status remains pending until the workflow triggered by the corrective push completes.
+
 ## Evidence handling
 
 Local raw K6 summaries and service logs are generated under ignored `artifacts/performance/`. CI uploads K6 and Playwright reports for 10 days. This report retains only the compact, selected evidence appropriate for source control.
