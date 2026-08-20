@@ -15,13 +15,22 @@ export interface PaymentServiceProcess {
   stop: () => Promise<void>;
 }
 
-export function startPaymentService(): PaymentServiceProcess {
+interface StartPaymentServiceOptions {
+  port?: number;
+}
+
+export function startPaymentService(
+  options: StartPaymentServiceOptions = {},
+): PaymentServiceProcess {
   const child: ChildProcessWithoutNullStreams = spawn(
     process.execPath,
     ['--import', 'tsx', 'services/payment-service/src/server.ts'],
     {
       cwd: repositoryRoot,
-      env: process.env,
+      env: {
+        ...process.env,
+        PORT: String(options.port ?? 3003),
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     },

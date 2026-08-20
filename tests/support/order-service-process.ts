@@ -19,6 +19,8 @@ export interface OrderServiceProcess {
 interface StartOrderServiceOptions {
   inventoryRequestTimeoutMs?: number;
   inventoryServiceUrl?: string;
+  paymentRequestTimeoutMs?: number;
+  paymentServiceUrl?: string;
 }
 
 export function startOrderService(
@@ -36,6 +38,11 @@ export function startOrderService(
           options.inventoryServiceUrl ?? 'http://127.0.0.1:3002',
         INVENTORY_REQUEST_TIMEOUT_MS: String(
           options.inventoryRequestTimeoutMs ?? 2000,
+        ),
+        PAYMENT_SERVICE_URL:
+          options.paymentServiceUrl ?? 'http://127.0.0.1:3003',
+        PAYMENT_REQUEST_TIMEOUT_MS: String(
+          options.paymentRequestTimeoutMs ?? 2000,
         ),
       },
       stdio: ['pipe', 'pipe', 'pipe'],

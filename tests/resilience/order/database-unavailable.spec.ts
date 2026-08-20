@@ -36,6 +36,14 @@ import {
   startOrderService,
   type OrderServiceProcess,
 } from '../../support/order-service-process.js';
+import {
+  startPaymentService,
+  type PaymentServiceProcess,
+} from '../../support/payment-service-process.js';
+import {
+  countPaymentsByOrderId,
+  readPaymentsByOrderId,
+} from '../../support/order-payment-database.js';
 
 interface ServiceLog {
   errorCode?: string;
@@ -62,6 +70,7 @@ interface ResilienceFixture {
 }
 
 const inventoryUrl = 'http://127.0.0.1:3002';
+const paymentUrl = 'http://127.0.0.1:3003';
 const healthyBody = {
   service: 'order-service',
   status: 'UP',
@@ -210,6 +219,7 @@ async function expectPendingState(
     idempotencyKey,
   });
   expect(await readInventoryReservationsByOrderId(row!.orderId)).toHaveLength(0);
+  expect(await countPaymentsByOrderId(row!.orderId)).toBe(0);
   await expectInitialState(fixture);
   return row!;
 }
@@ -228,6 +238,25 @@ async function waitForInventoryHealth(): Promise<void> {
     })
     .toEqual({
       service: 'inventory-service',
+      status: 'UP',
+      dependencies: { database: 'UP' },
+    });
+}
+
+async function waitForPaymentHealth(): Promise<void> {
+  await expect
+    .poll(async () => {
+      try {
+        const response = await fetch(`${paymentUrl}/health`, {
+          signal: AbortSignal.timeout(1000),
+        });
+        return response.status === 200 ? response.json() : null;
+      } catch {
+        return null;
+      }
+    })
+    .toEqual({
+      service: 'payment-service',
       status: 'UP',
       dependencies: { database: 'UP' },
     });
@@ -260,7 +289,7 @@ async function expectRecoveredOrder({
   const recoveredOrder = await readOrderResponse(
     recoveryResponse,
     200,
-    'INVENTORY_RESERVED',
+    'CONFIRMED',
   );
   expect(recoveredOrder).toEqual({
     orderId: pendingOrderId,
@@ -268,7 +297,7 @@ async function expectRecoveredOrder({
     quantity: 2,
     amountInCents: 5990,
     currency: 'BRL',
-    status: 'INVENTORY_RESERVED',
+    status: 'CONFIRMED',
     createdAt: pendingCreatedAt.toISOString(),
   });
 
@@ -276,11 +305,13 @@ async function expectRecoveredOrder({
   expect(orderRows).toHaveLength(1);
   expect(orderRows[0]).toMatchObject({
     orderId: pendingOrderId,
-    status: 'INVENTORY_RESERVED',
-    paymentId: null,
+    status: 'CONFIRMED',
     failureCode: null,
   });
   expect(orderRows[0]?.inventoryReservationId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
+  expect(orderRows[0]?.paymentId).toMatch(
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
   );
 
@@ -299,6 +330,14 @@ async function expectRecoveredOrder({
     reservedQuantity: 2,
     availableQuantity: fixture.totalQuantity - 2,
   });
+  const payments = await readPaymentsByOrderId(pendingOrderId);
+  expect(payments).toHaveLength(1);
+  expect(payments[0]).toMatchObject({
+    paymentId: orderRows[0]?.paymentId,
+    orderId: pendingOrderId,
+    status: 'APPROVED',
+    idempotencyKey: `order:${pendingOrderId}:payment`,
+  });
 
   const terminalCorrelationId = `correlation-${randomUUID()}`;
   expect(terminalCorrelationId).not.toBe(firstCorrelationId);
@@ -313,11 +352,12 @@ async function expectRecoveredOrder({
   const terminalOrder = await readOrderResponse(
     terminalReplayResponse,
     200,
-    'INVENTORY_RESERVED',
+    'CONFIRMED',
   );
   expect(terminalOrder).toEqual(recoveredOrder);
   expect(await countOrdersByIdempotencyKey(idempotencyKey)).toBe(1);
   expect(await countInventoryReservationsBySku(fixture.sku)).toBe(1);
+  expect(await countPaymentsByOrderId(pendingOrderId)).toBe(1);
   expect((await readInventoryProduct(fixture.sku))?.reservedQuantity).toBe(2);
 }
 
@@ -460,10 +500,13 @@ test('recovers a pending order after Inventory becomes available', async ({
   const idempotencyKey = `order-resilience-unavailable-${randomUUID()}`;
   const firstCorrelationId = `correlation-${randomUUID()}`;
   let inventoryProcess: InventoryServiceProcess | undefined;
+  let paymentProcess: PaymentServiceProcess | undefined;
 
   await cleanupScenario(idempotencyKey, fixture);
   await expect.poll(async () => (await getRabbitMqStatus()).Health).toBe('healthy');
   await expect.poll(() => isPortReachable(3002)).toBe(false);
+  paymentProcess = startPaymentService();
+  await waitForPaymentHealth();
   const orderProcess = startOrderService({ inventoryServiceUrl: inventoryUrl });
 
   try {
@@ -489,6 +532,7 @@ test('recovers a pending order after Inventory becomes available', async ({
     });
   } finally {
     await inventoryProcess?.stop();
+    await paymentProcess?.stop();
     await orderProcess.stop();
     await cleanupScenario(idempotencyKey, fixture);
     await expect.poll(() => isOrderPortReachable()).toBe(false);
@@ -505,6 +549,7 @@ test('keeps an order pending after an Inventory timeout and recovers without ret
   const firstCorrelationId = `correlation-${randomUUID()}`;
   let mock: InventoryMockServer | undefined;
   let inventoryProcess: InventoryServiceProcess | undefined;
+  let paymentProcess: PaymentServiceProcess | undefined;
   let orderProcess: OrderServiceProcess | undefined;
 
   await cleanupScenario(idempotencyKey, fixture);
@@ -513,6 +558,8 @@ test('keeps an order pending after an Inventory timeout and recovers without ret
     mock = await startInventoryMockServer({
       response: { status: 201, body: { status: 'RESERVED' }, delayMs: 750 },
     });
+    paymentProcess = startPaymentService();
+    await waitForPaymentHealth();
     orderProcess = startOrderService({
       inventoryServiceUrl: inventoryUrl,
       inventoryRequestTimeoutMs: 200,
@@ -549,6 +596,7 @@ test('keeps an order pending after an Inventory timeout and recovers without ret
     });
   } finally {
     await inventoryProcess?.stop();
+    await paymentProcess?.stop();
     await mock?.stop();
     await orderProcess?.stop();
     await cleanupScenario(idempotencyKey, fixture);
@@ -565,6 +613,7 @@ test('keeps an order pending after an unexpected Inventory 409 and recovers', as
   const firstCorrelationId = `correlation-${randomUUID()}`;
   let mock: InventoryMockServer | undefined;
   let inventoryProcess: InventoryServiceProcess | undefined;
+  let paymentProcess: PaymentServiceProcess | undefined;
   let orderProcess: OrderServiceProcess | undefined;
 
   await cleanupScenario(idempotencyKey, fixture);
@@ -579,6 +628,8 @@ test('keeps an order pending after an unexpected Inventory 409 and recovers', as
         },
       },
     });
+    paymentProcess = startPaymentService();
+    await waitForPaymentHealth();
     orderProcess = startOrderService({ inventoryServiceUrl: inventoryUrl });
     await expect.poll(() => isOrderPortReachable()).toBe(true);
 
@@ -611,6 +662,7 @@ test('keeps an order pending after an unexpected Inventory 409 and recovers', as
     });
   } finally {
     await inventoryProcess?.stop();
+    await paymentProcess?.stop();
     await mock?.stop();
     await orderProcess?.stop();
     await cleanupScenario(idempotencyKey, fixture);
@@ -627,6 +679,7 @@ test('keeps an order pending after an invalid Inventory success contract and rec
   const firstCorrelationId = `correlation-${randomUUID()}`;
   let mock: InventoryMockServer | undefined;
   let inventoryProcess: InventoryServiceProcess | undefined;
+  let paymentProcess: PaymentServiceProcess | undefined;
   let orderProcess: OrderServiceProcess | undefined;
 
   await cleanupScenario(idempotencyKey, fixture);
@@ -635,6 +688,8 @@ test('keeps an order pending after an invalid Inventory success contract and rec
     mock = await startInventoryMockServer({
       response: { status: 201, body: { status: 'RESERVED' } },
     });
+    paymentProcess = startPaymentService();
+    await waitForPaymentHealth();
     orderProcess = startOrderService({ inventoryServiceUrl: inventoryUrl });
     await expect.poll(() => isOrderPortReachable()).toBe(true);
 
@@ -667,6 +722,7 @@ test('keeps an order pending after an invalid Inventory success contract and rec
     });
   } finally {
     await inventoryProcess?.stop();
+    await paymentProcess?.stop();
     await mock?.stop();
     await orderProcess?.stop();
     await cleanupScenario(idempotencyKey, fixture);
