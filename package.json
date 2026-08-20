@@ -17,6 +17,12 @@
     "test:resilience:order": "playwright test --config tests/playwright.order-resilience.config.ts",
     "test:resilience:payment": "playwright test --config tests/playwright.payment-resilience.config.ts",
     "test:events": "playwright test --config tests/playwright.events.config.ts",
+    "performance:prepare": "node performance/scripts/manage-test-data.mjs prepare",
+    "performance:verify": "node performance/scripts/manage-test-data.mjs verify",
+    "performance:cleanup": "node performance/scripts/manage-test-data.mjs cleanup",
+    "test:performance:smoke": "node performance/scripts/run-performance.mjs smoke",
+    "test:performance:load": "node performance/scripts/run-performance.mjs load",
+    "test:performance:concurrency": "node performance/scripts/run-performance.mjs concurrency",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down --remove-orphans",
     "docker:logs": "docker compose logs -f"
