@@ -331,6 +331,9 @@ test('returns 503 during a payment database outage and recovers without restarti
     await expect
       .poll(async () => (await getPostgresStatus()).Health)
       .toBe('healthy');
+    await queryPaymentDatabase(
+      "DELETE FROM payments WHERE idempotency_key LIKE 'payment-resilience-%'",
+    );
     await serviceProcess.stop();
     await expect.poll(() => isPortReachable(3003)).toBe(false);
     await expect

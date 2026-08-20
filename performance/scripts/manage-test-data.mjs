@@ -169,7 +169,7 @@ export async function cleanupPerformanceData() {
     );
   }
   await withClient(urls.inventory, (client) =>
-    client.query("UPDATE products SET reserved_quantity = 0 WHERE sku LIKE 'PERF-%'"),
+    client.query("DELETE FROM products WHERE sku LIKE 'PERF-%'"),
   );
   await purgePerformanceQueues();
 }

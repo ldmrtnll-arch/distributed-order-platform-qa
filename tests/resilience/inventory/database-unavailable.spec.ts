@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { expect, test, type APIResponse } from '@playwright/test';
 
+import { queryInventoryDatabase } from '../../support/database.js';
 import {
   getPostgresStatus,
   startPostgres,
@@ -252,6 +253,14 @@ test('returns 503 during a database outage and recovers without restarting', asy
     await expect
       .poll(async () => (await getPostgresStatus()).Health)
       .toBe('healthy');
+    await queryInventoryDatabase(
+      'DELETE FROM inventory_reservations WHERE sku = $1',
+      [sku],
+    );
+    await queryInventoryDatabase(
+      'UPDATE products SET reserved_quantity = 0 WHERE sku = $1',
+      [sku],
+    );
     await serviceProcess.stop();
     await expect.poll(() => isPortReachable(3002)).toBe(false);
   }
