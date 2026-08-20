@@ -10,7 +10,10 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.54.2",
+    "@types/amqplib": "^0.10.8",
     "@types/pg": "^8.20.4",
+    "ajv": "^8.17.1",
+    "amqplib": "^0.10.9",
     "dotenv": "^17.4.2",
     "pg": "^8.22.0"
   }
