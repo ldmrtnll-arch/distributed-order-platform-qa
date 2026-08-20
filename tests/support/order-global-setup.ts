@@ -4,6 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from 'pg';
 
+import { orderInventoryFixtures } from './order-inventory-fixtures.js';
+
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
@@ -19,12 +21,24 @@ config({
 });
 
 export default async function orderGlobalSetup(): Promise<void> {
-  const connectionString = process.env.ORDER_DATABASE_URL;
-  if (connectionString === undefined || connectionString.trim() === '') {
+  const orderConnectionString = process.env.ORDER_DATABASE_URL;
+  const inventoryConnectionString = process.env.INVENTORY_DATABASE_URL;
+  if (
+    orderConnectionString === undefined ||
+    orderConnectionString.trim() === ''
+  ) {
     throw new Error('ORDER_DATABASE_URL is required for order resilience.');
   }
+  if (
+    inventoryConnectionString === undefined ||
+    inventoryConnectionString.trim() === ''
+  ) {
+    throw new Error(
+      'INVENTORY_DATABASE_URL is required for order resilience.',
+    );
+  }
 
-  const migration = await readFile(
+  const orderMigration = await readFile(
     path.join(
       repositoryRoot,
       'services',
@@ -35,13 +49,85 @@ export default async function orderGlobalSetup(): Promise<void> {
     ),
     'utf8',
   );
-  const client = new Client({ connectionString });
+  const inventoryDatabaseDirectory = path.join(
+    repositoryRoot,
+    'services',
+    'inventory-service',
+    'database',
+  );
+  const inventoryMigrations = await Promise.all(
+    [
+      'migrations/001_create_products.sql',
+      'migrations/002_create_inventory_reservations.sql',
+      'migrations/003_add_reservation_release.sql',
+    ].map((relativePath) =>
+      readFile(path.join(inventoryDatabaseDirectory, relativePath), 'utf8'),
+    ),
+  );
+  const orderClient = new Client({ connectionString: orderConnectionString });
 
   try {
-    await client.connect();
-    await client.query(migration);
-    await client.query('DELETE FROM orders');
+    await orderClient.connect();
+    await orderClient.query(orderMigration);
+    await orderClient.query('DELETE FROM orders');
   } finally {
-    await client.end();
+    await orderClient.end();
+  }
+
+  const inventoryClient = new Client({
+    connectionString: inventoryConnectionString,
+  });
+  const resilienceProducts = [
+    orderInventoryFixtures.resilience,
+    orderInventoryFixtures.resilienceTimeout,
+    orderInventoryFixtures.resilienceUnexpected409,
+    orderInventoryFixtures.resilienceInvalidContract,
+  ];
+
+  try {
+    await inventoryClient.connect();
+    for (const migration of inventoryMigrations) {
+      await inventoryClient.query(migration);
+    }
+
+    await inventoryClient.query('BEGIN');
+    await inventoryClient.query(
+      `DELETE FROM inventory_reservations
+       WHERE sku = ANY($1::text[])`,
+      [resilienceProducts.map((product) => product.sku)],
+    );
+    await inventoryClient.query(
+      `INSERT INTO products (
+         sku,
+         name,
+         total_quantity,
+         reserved_quantity
+       )
+       SELECT *
+       FROM UNNEST(
+         $1::text[],
+         $2::text[],
+         $3::integer[],
+         $4::integer[]
+       )
+       ON CONFLICT (sku)
+       DO UPDATE SET
+         name = EXCLUDED.name,
+         total_quantity = EXCLUDED.total_quantity,
+         reserved_quantity = EXCLUDED.reserved_quantity,
+         updated_at = CURRENT_TIMESTAMP`,
+      [
+        resilienceProducts.map((product) => product.sku),
+        resilienceProducts.map((product) => product.name),
+        resilienceProducts.map((product) => product.totalQuantity),
+        resilienceProducts.map(() => 0),
+      ],
+    );
+    await inventoryClient.query('COMMIT');
+  } catch (error) {
+    await inventoryClient.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    await inventoryClient.end();
   }
 }

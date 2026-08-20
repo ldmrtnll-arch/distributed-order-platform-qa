@@ -16,7 +16,13 @@ export interface InventoryServiceProcess {
   stop: () => Promise<void>;
 }
 
-export function startInventoryService(): InventoryServiceProcess {
+interface StartInventoryServiceOptions {
+  port?: number;
+}
+
+export function startInventoryService(
+  options: StartInventoryServiceOptions = {},
+): InventoryServiceProcess {
   const child: ChildProcessWithoutNullStreams = spawn(
     process.execPath,
     [
@@ -26,7 +32,10 @@ export function startInventoryService(): InventoryServiceProcess {
     ],
     {
       cwd: repositoryRoot,
-      env: process.env,
+      env: {
+        ...process.env,
+        PORT: String(options.port ?? 3002),
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     },

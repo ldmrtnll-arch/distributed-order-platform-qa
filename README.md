@@ -1,87 +1,71 @@
 # Distributed Order Platform QA
 
-Quality Assurance portfolio project focused on testing a distributed order-processing platform composed of REST APIs, databases, asynchronous messages, and external service dependencies.
+Quality Assurance portfolio project for a distributed order-processing platform composed of REST APIs, independent PostgreSQL databases, and infrastructure prepared for asynchronous messaging.
 
-## Project Status
+## Project status
 
-This project is currently in the planning and environment setup phase.
+The repository currently implements and tests the Inventory, Payment, and Order services. The active end-to-end workflow is limited to the synchronous integration from Order Service to Inventory Service; Payment is tested as an independent service and is not yet part of the Order workflow. RabbitMQ is available in the local infrastructure, but domain-event publishing and Notification Service remain future work.
 
-The test documentation, infrastructure, services, automated tests, execution evidence, and CI pipeline will be developed incrementally.
+See [System Architecture](docs/architecture.md) and [Project Status](docs/project-status.md) for the implemented scope and remaining work.
 
-## Documentation
+## Implemented Order to Inventory flow
 
-- [Planned System Architecture](docs/architecture.md)
-- [Project Status](docs/project-status.md)
+`POST /orders` persists an Order as `PENDING` and calls `POST /reservations` synchronously. Order propagates `X-Correlation-Id` and protects the dependency call with the internal idempotency key `order:<orderId>:inventory-reservation`.
 
-## System Scenario
+The current state transitions are:
 
-The application simulates an e-commerce order workflow distributed across multiple services:
+* `PENDING -> INVENTORY_RESERVED` when Inventory creates or replays the reservation;
+* `PENDING -> INVENTORY_REJECTED` for terminal business outcomes: unknown SKU or insufficient stock;
+* `PENDING` remains recoverable when Inventory is unavailable, times out, returns an unexpected status, or violates the success response contract.
 
-* Order Service
-* Inventory Service
-* Payment Service
-* Notification Service
-* PostgreSQL databases
-* RabbitMQ message broker
+A client can recover a technical failure by replaying the same payload and `Idempotency-Key`. The existing Order is reused, a new correlation ID may be supplied, and stock is reserved only once. There is no automatic Inventory retry in the Order Service at this stage.
 
-A customer creates an order, the inventory is reserved, the payment is processed, and events are published for the other services.
+## Automated coverage
 
-## Planned Test Coverage
+The Playwright suites cover:
 
-The project will include:
+* Inventory, Payment, and Order API contracts;
+* idempotent replay and idempotency conflicts;
+* inventory business rejection and stock concurrency;
+* Order and Inventory cross-database consistency;
+* dependency unavailability, timeout, unexpected responses, and recovery;
+* correlation-ID propagation and internal reservation idempotency;
+* validation, safe public errors, and database constraints.
 
-* API testing
-* Integration testing
-* Contract testing
-* Database testing
-* Asynchronous messaging testing
-* Idempotency testing
-* Retry and timeout validation
-* Dependency failure testing
-* Data consistency validation
-* Correlation ID and log validation
-* Basic performance testing
-* Continuous integration
+Start the project infrastructure and run the normal suite with:
 
-## Planned Technologies
+```powershell
+npm run docker:up
+npm test
+```
 
-* Node.js
-* TypeScript
+Run the serialized Order resilience suite separately with:
+
+```powershell
+npm run test:resilience:order
+```
+
+Type-check every workspace with:
+
+```powershell
+npm run typecheck
+```
+
+The Order resilience suite controls ports `3001` and `3002`, and starts/stops only the service processes it creates. PostgreSQL and RabbitMQ must be healthy before execution.
+
+## Technology
+
+* Node.js and TypeScript with ES Modules/NodeNext
+* Express
 * Playwright
 * PostgreSQL
 * RabbitMQ
-* Docker
 * Docker Compose
-* JSON Schema
-* Ajv
-* k6
-* GitHub Actions
 
-## Main Quality Risks
+## Main quality risks
 
-The project will investigate risks commonly found in distributed systems, including:
+The project focuses on duplicate processing, inconsistent cross-service state, dependency failures, incompatible contracts, incorrect retry behavior, concurrency, missing traceability, and sensitive information in public responses or logs.
 
-* duplicated orders or messages;
-* inconsistent data between services;
-* unavailable dependencies;
-* delayed event processing;
-* incompatible API or event contracts;
-* incorrect retry behavior;
-* missing request traceability;
-* partial failures during order processing.
+## Scope boundary
 
-## Repository Structure
-
-The repository structure will be expanded incrementally as each project phase is implemented.
-
-```text
-distributed-order-platform-qa/
-├── docs/
-│   └── project-status.md
-├── .gitignore
-└── README.md
-```
-
-## Current Phase
-
-Repository initialization and project documentation.
+The complete target architecture includes Payment orchestration, compensation, RabbitMQ domain events, and Notification Service. Those components must not be interpreted as already integrated into the current Order workflow.
