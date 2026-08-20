@@ -3,6 +3,16 @@ import { createHash, randomUUID } from 'node:crypto';
 import { expect, test, type APIResponse } from '@playwright/test';
 
 import { queryOrderDatabase } from '../../support/database.js';
+import {
+  cleanupOrderInventoryFixture,
+  countInventoryReservationsBySku,
+  countOrdersByIdempotencyKey,
+  readInventoryProduct,
+  readInventoryReservationsByOrderId,
+  readOrderById,
+  type OrderDatabaseRow,
+} from '../../support/order-inventory-database.js';
+import { orderInventoryFixtures } from '../../support/order-inventory-fixtures.js';
 
 interface OrderResponse {
   orderId: string;
@@ -14,26 +24,6 @@ interface OrderResponse {
   createdAt: string;
 }
 
-interface OrderRow {
-  order_id: string;
-  sku: string;
-  quantity: number;
-  amount: number;
-  currency: string;
-  status: string;
-  inventory_reservation_id: string | null;
-  payment_id: string | null;
-  failure_code: string | null;
-  idempotency_key: string;
-  request_fingerprint: string;
-  created_at: Date;
-  updated_at: Date;
-}
-
-interface CountRow {
-  count: number;
-}
-
 interface ColumnRow {
   column_name: string;
 }
@@ -42,21 +32,21 @@ const orderUrl = 'http://127.0.0.1:3001/orders';
 const testKeyPrefix = 'db-order-test-';
 const orderRowFields = [
   'amount',
-  'created_at',
+  'createdAt',
   'currency',
-  'failure_code',
-  'idempotency_key',
-  'inventory_reservation_id',
-  'order_id',
-  'payment_id',
+  'failureCode',
+  'idempotencyKey',
+  'inventoryReservationId',
+  'orderId',
+  'paymentId',
   'quantity',
-  'request_fingerprint',
+  'requestFingerprint',
   'sku',
   'status',
-  'updated_at',
+  'updatedAt',
 ];
 
-function createRequestBody(): {
+function createRequestBody(sku: string): {
   sku: string;
   quantity: number;
   amountInCents: number;
@@ -64,11 +54,11 @@ function createRequestBody(): {
   paymentToken: string;
 } {
   return {
-    sku: ' db-book-001 ',
+    sku,
     quantity: 2,
     amountInCents: 5990,
-    currency: ' brl ',
-    paymentToken: ' tok_approved ',
+    currency: 'BRL',
+    paymentToken: 'tok_approved',
   };
 }
 
@@ -81,96 +71,60 @@ async function readOrder(
   expect(body.orderId).toMatch(
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
   );
-  expect(body.status).toBe('PENDING');
+  expect(body.status).toBe('INVENTORY_RESERVED');
   return body;
 }
 
-async function readRowsByKey(idempotencyKey: string): Promise<OrderRow[]> {
-  return queryOrderDatabase<OrderRow>(
-    `
-      SELECT
-        order_id,
-        sku,
-        quantity,
-        amount,
-        currency,
-        status,
-        inventory_reservation_id,
-        payment_id,
-        failure_code,
-        idempotency_key,
-        request_fingerprint,
-        created_at,
-        updated_at
-      FROM orders
-      WHERE idempotency_key = $1
-    `,
-    [idempotencyKey],
-  );
-}
-
-async function readCountByKey(idempotencyKey: string): Promise<number> {
-  const rows = await queryOrderDatabase<CountRow>(
-    `
-      SELECT COUNT(*)::integer AS count
-      FROM orders
-      WHERE idempotency_key = $1
-    `,
-    [idempotencyKey],
-  );
-  return rows[0]?.count ?? -1;
-}
-
-async function cleanupOrder(idempotencyKey: string): Promise<void> {
-  await queryOrderDatabase(
-    'DELETE FROM orders WHERE idempotency_key = $1',
-    [idempotencyKey],
-  );
-  expect(await readCountByKey(idempotencyKey)).toBe(0);
-}
-
-function expectPendingRow(
-  row: OrderRow,
+function expectReservedRow(
+  row: OrderDatabaseRow,
   order: OrderResponse,
   idempotencyKey: string,
+  sku: string,
 ): void {
   expect(Object.keys(row).sort()).toEqual(orderRowFields);
-  expect(row.order_id).toBe(order.orderId);
-  expect(row.sku).toBe('DB-BOOK-001');
+  expect(row.orderId).toBe(order.orderId);
+  expect(row.sku).toBe(sku);
   expect(row.quantity).toBe(2);
   expect(row.amount).toBe(5990);
   expect(row.currency).toBe('BRL');
-  expect(row.status).toBe('PENDING');
-  expect(row.inventory_reservation_id).toBeNull();
-  expect(row.payment_id).toBeNull();
-  expect(row.failure_code).toBeNull();
-  expect(row.idempotency_key === idempotencyKey).toBe(true);
-  expect(row.request_fingerprint).toMatch(/^[0-9a-f]{64}$/);
-  expect(Number.isNaN(Date.parse(String(row.created_at)))).toBe(false);
-  expect(Number.isNaN(Date.parse(String(row.updated_at)))).toBe(false);
-  expect(new Date(row.created_at).toISOString()).toBe(order.createdAt);
+  expect(row.status).toBe('INVENTORY_RESERVED');
+  expect(row.inventoryReservationId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
+  expect(row.paymentId).toBeNull();
+  expect(row.failureCode).toBeNull();
+  expect(row.idempotencyKey === idempotencyKey).toBe(true);
+  expect(row.requestFingerprint).toMatch(/^[0-9a-f]{64}$/);
+  expect(Number.isNaN(Date.parse(String(row.createdAt)))).toBe(false);
+  expect(Number.isNaN(Date.parse(String(row.updatedAt)))).toBe(false);
+  expect(row.createdAt.toISOString()).toBe(order.createdAt);
 }
 
 test.describe('POST /orders database consistency', () => {
-  test.afterAll(async () => {
-    const remainingRows = await queryOrderDatabase<CountRow>(
-      `
-        SELECT COUNT(*)::integer AS count
-        FROM orders
-        WHERE idempotency_key LIKE $1
-      `,
-      [`${testKeyPrefix}%`],
-    );
-    expect(remainingRows).toEqual([{ count: 0 }]);
-  });
-
-  test('persists a pending order with the expected database state and fingerprint', async ({
+  test('persists an inventory-reserved order with the expected cross-database state and fingerprint', async ({
     request,
   }) => {
-    const idempotencyKey = `${testKeyPrefix}${randomUUID()}`;
-    const requestBody = createRequestBody();
+    const fixture = orderInventoryFixtures.database;
+    const idempotencyKey = `${testKeyPrefix}persistence-${randomUUID()}`;
+    const requestBody = createRequestBody(fixture.sku);
 
     try {
+      const [initialOrderCount, initialReservationCount, initialProduct] =
+        await Promise.all([
+          countOrdersByIdempotencyKey(idempotencyKey),
+          countInventoryReservationsBySku(fixture.sku),
+          readInventoryProduct(fixture.sku),
+        ]);
+
+      expect(initialOrderCount).toBe(0);
+      expect(initialReservationCount).toBe(0);
+      expect(initialProduct).toEqual({
+        sku: fixture.sku,
+        totalQuantity: fixture.totalQuantity,
+        reservedQuantity: 0,
+        availableQuantity: fixture.totalQuantity,
+      });
+
       const response = await request.post(orderUrl, {
         headers: {
           'Idempotency-Key': idempotencyKey,
@@ -178,35 +132,29 @@ test.describe('POST /orders database consistency', () => {
         },
         data: requestBody,
       });
+      expect(response.headers()).not.toHaveProperty('idempotent-replay');
       const order = await readOrder(response, 201);
+      expect(order).toEqual({
+        orderId: order.orderId,
+        sku: fixture.sku,
+        quantity: 2,
+        amountInCents: 5990,
+        currency: 'BRL',
+        status: 'INVENTORY_RESERVED',
+        createdAt: order.createdAt,
+      });
 
-      const rows = await queryOrderDatabase<OrderRow>(
-        `
-          SELECT
-            order_id,
-            sku,
-            quantity,
-            amount,
-            currency,
-            status,
-            inventory_reservation_id,
-            payment_id,
-            failure_code,
-            idempotency_key,
-            request_fingerprint,
-            created_at,
-            updated_at
-          FROM orders
-          WHERE order_id = $1
-        `,
-        [order.orderId],
-      );
+      const rows = await readOrderById(order.orderId);
 
       expect(rows).toHaveLength(1);
       const row = rows[0];
       expect(row).toBeDefined();
       if (row === undefined) throw new Error('Persisted order was not found.');
-      expectPendingRow(row, order, idempotencyKey);
+      expectReservedRow(row, order, idempotencyKey, fixture.sku);
+      const inventoryReservationId = row.inventoryReservationId;
+      if (inventoryReservationId === null) {
+        throw new Error('Persisted Order has no Inventory reservation.');
+      }
 
       const expectedFingerprint = createHash('sha256')
         .update(
@@ -219,12 +167,34 @@ test.describe('POST /orders database consistency', () => {
           ]),
         )
         .digest('hex');
-      expect(row.request_fingerprint.length).toBe(64);
-      expect(row.request_fingerprint === expectedFingerprint).toBe(true);
-      expect(new Date(row.created_at).toISOString()).toBe(order.createdAt);
-      expect(new Date(row.created_at).toISOString()).toBe(
-        new Date(row.updated_at).toISOString(),
+      expect(row.requestFingerprint.length).toBe(64);
+      expect(row.requestFingerprint === expectedFingerprint).toBe(true);
+      expect(row.createdAt.toISOString()).toBe(order.createdAt);
+      expect(row.updatedAt.getTime()).toBeGreaterThanOrEqual(
+        row.createdAt.getTime(),
       );
+
+      const reservationRows =
+        await readInventoryReservationsByOrderId(order.orderId);
+      expect(reservationRows).toEqual([
+        {
+          reservationId: inventoryReservationId,
+          orderId: order.orderId,
+          sku: fixture.sku,
+          quantity: 2,
+          status: 'RESERVED',
+          releaseIdempotencyKey: null,
+          releaseRequestFingerprint: null,
+          releasedAt: null,
+        },
+      ]);
+
+      expect(await readInventoryProduct(fixture.sku)).toEqual({
+        sku: fixture.sku,
+        totalQuantity: fixture.totalQuantity,
+        reservedQuantity: 2,
+        availableQuantity: fixture.totalQuantity - 2,
+      });
 
       const tokenColumns = await queryOrderDatabase<ColumnRow>(
         `
@@ -237,17 +207,52 @@ test.describe('POST /orders database consistency', () => {
       );
       expect(tokenColumns).toEqual([]);
     } finally {
-      await cleanupOrder(idempotencyKey);
+      await cleanupOrderInventoryFixture({
+        idempotencyKey,
+        sku: fixture.sku,
+        totalQuantity: fixture.totalQuantity,
+      });
+
+      const [remainingOrders, remainingReservations, restoredProduct] =
+        await Promise.all([
+          countOrdersByIdempotencyKey(idempotencyKey),
+          countInventoryReservationsBySku(fixture.sku),
+          readInventoryProduct(fixture.sku),
+        ]);
+      expect(remainingOrders).toBe(0);
+      expect(remainingReservations).toBe(0);
+      expect(restoredProduct).toEqual({
+        sku: fixture.sku,
+        totalQuantity: fixture.totalQuantity,
+        reservedQuantity: 0,
+        availableQuantity: fixture.totalQuantity,
+      });
     }
   });
 
   test('does not create another database row or update timestamps on idempotent replay', async ({
     request,
   }) => {
-    const idempotencyKey = `${testKeyPrefix}${randomUUID()}`;
-    const requestBody = createRequestBody();
+    const fixture = orderInventoryFixtures.databaseReplay;
+    const idempotencyKey = `${testKeyPrefix}replay-${randomUUID()}`;
+    const requestBody = createRequestBody(fixture.sku);
 
     try {
+      const [initialOrderCount, initialReservationCount, initialProduct] =
+        await Promise.all([
+          countOrdersByIdempotencyKey(idempotencyKey),
+          countInventoryReservationsBySku(fixture.sku),
+          readInventoryProduct(fixture.sku),
+        ]);
+      expect(initialOrderCount).toBe(0);
+      expect(initialReservationCount).toBe(0);
+      expect(initialProduct).toEqual({
+        sku: fixture.sku,
+        totalQuantity: fixture.totalQuantity,
+        reservedQuantity: 0,
+        availableQuantity: fixture.totalQuantity,
+      });
+
       const creationResponse = await request.post(orderUrl, {
         headers: {
           'Idempotency-Key': idempotencyKey,
@@ -255,10 +260,50 @@ test.describe('POST /orders database consistency', () => {
         },
         data: requestBody,
       });
+      expect(creationResponse.headers()).not.toHaveProperty(
+        'idempotent-replay',
+      );
       const createdOrder = await readOrder(creationResponse, 201);
-      const rowsBefore = await readRowsByKey(idempotencyKey);
+      const rowsBefore = await readOrderById(createdOrder.orderId);
       expect(rowsBefore).toHaveLength(1);
-      expect(await readCountByKey(idempotencyKey)).toBe(1);
+      expect(await countOrdersByIdempotencyKey(idempotencyKey)).toBe(1);
+      const rowBefore = rowsBefore[0];
+      expect(rowBefore).toBeDefined();
+      if (rowBefore === undefined) {
+        throw new Error('Persisted order was not found.');
+      }
+      expectReservedRow(
+        rowBefore,
+        createdOrder,
+        idempotencyKey,
+        fixture.sku,
+      );
+      const inventoryReservationId = rowBefore.inventoryReservationId;
+      if (inventoryReservationId === null) {
+        throw new Error('Persisted Order has no Inventory reservation.');
+      }
+
+      const reservationsBefore =
+        await readInventoryReservationsByOrderId(createdOrder.orderId);
+      expect(reservationsBefore).toEqual([
+        {
+          reservationId: inventoryReservationId,
+          orderId: createdOrder.orderId,
+          sku: fixture.sku,
+          quantity: 2,
+          status: 'RESERVED',
+          releaseIdempotencyKey: null,
+          releaseRequestFingerprint: null,
+          releasedAt: null,
+        },
+      ]);
+      const productAfterCreation = await readInventoryProduct(fixture.sku);
+      expect(productAfterCreation).toEqual({
+        sku: fixture.sku,
+        totalQuantity: fixture.totalQuantity,
+        reservedQuantity: 2,
+        availableQuantity: fixture.totalQuantity - 2,
+      });
 
       const replayResponse = await request.post(orderUrl, {
         headers: {
@@ -271,39 +316,96 @@ test.describe('POST /orders database consistency', () => {
       const replayedOrder = await readOrder(replayResponse, 200);
       expect(replayedOrder).toEqual(createdOrder);
 
-      const rowsAfter = await readRowsByKey(idempotencyKey);
+      const rowsAfter = await readOrderById(createdOrder.orderId);
       expect(rowsAfter).toHaveLength(1);
-      expect(await readCountByKey(idempotencyKey)).toBe(1);
+      expect(await countOrdersByIdempotencyKey(idempotencyKey)).toBe(1);
       expect(rowsAfter).toEqual(rowsBefore);
       const rowAfter = rowsAfter[0];
       expect(rowAfter).toBeDefined();
       if (rowAfter === undefined) throw new Error('Persisted order was not found.');
-      expect(rowAfter.order_id).toBe(createdOrder.orderId);
-      expect(rowAfter.status).toBe('PENDING');
+      expect(rowAfter.orderId).toBe(createdOrder.orderId);
+      expect(rowAfter.status).toBe('INVENTORY_RESERVED');
+      expect(rowAfter.inventoryReservationId).toBe(inventoryReservationId);
+      expect(rowAfter.createdAt.toISOString()).toBe(
+        rowBefore.createdAt.toISOString(),
+      );
+      expect(rowAfter.updatedAt.toISOString()).toBe(
+        rowBefore.updatedAt.toISOString(),
+      );
+
+      const reservationsAfter =
+        await readInventoryReservationsByOrderId(createdOrder.orderId);
+      expect(reservationsAfter).toHaveLength(1);
+      expect(reservationsAfter).toEqual(reservationsBefore);
+      expect(reservationsAfter[0]?.reservationId).toBe(
+        inventoryReservationId,
+      );
+      const productAfterReplay = await readInventoryProduct(fixture.sku);
+      expect(productAfterReplay).toEqual(productAfterCreation);
+      expect(productAfterReplay?.reservedQuantity).toBe(2);
+      expect(productAfterReplay?.reservedQuantity).not.toBe(4);
     } finally {
-      await cleanupOrder(idempotencyKey);
+      await cleanupOrderInventoryFixture({
+        idempotencyKey,
+        sku: fixture.sku,
+        totalQuantity: fixture.totalQuantity,
+      });
+
+      const [remainingOrders, remainingReservations, restoredProduct] =
+        await Promise.all([
+          countOrdersByIdempotencyKey(idempotencyKey),
+          countInventoryReservationsBySku(fixture.sku),
+          readInventoryProduct(fixture.sku),
+        ]);
+      expect(remainingOrders).toBe(0);
+      expect(remainingReservations).toBe(0);
+      expect(restoredProduct).toEqual({
+        sku: fixture.sku,
+        totalQuantity: fixture.totalQuantity,
+        reservedQuantity: 0,
+        availableQuantity: fixture.totalQuantity,
+      });
     }
   });
 
   test('persists only one row for concurrent requests with the same idempotency key', async ({
     request,
   }) => {
-    const idempotencyKey = `${testKeyPrefix}${randomUUID()}`;
-    const requestBody = createRequestBody();
+    const fixture = orderInventoryFixtures.databaseConcurrent;
+    const idempotencyKey = `${testKeyPrefix}concurrent-${randomUUID()}`;
+    const requestBody = createRequestBody(fixture.sku);
+    const firstCorrelationId = `db-order-concurrent-first-${randomUUID()}`;
+    const secondCorrelationId = `db-order-concurrent-second-${randomUUID()}`;
 
     try {
+      const [initialOrderCount, initialReservationCount, initialProduct] =
+        await Promise.all([
+          countOrdersByIdempotencyKey(idempotencyKey),
+          countInventoryReservationsBySku(fixture.sku),
+          readInventoryProduct(fixture.sku),
+        ]);
+      expect(initialOrderCount).toBe(0);
+      expect(initialReservationCount).toBe(0);
+      expect(initialProduct).toEqual({
+        sku: fixture.sku,
+        totalQuantity: fixture.totalQuantity,
+        reservedQuantity: 0,
+        availableQuantity: fixture.totalQuantity,
+      });
+      expect(firstCorrelationId).not.toBe(secondCorrelationId);
+
       const responses = await Promise.all([
         request.post(orderUrl, {
           headers: {
             'Idempotency-Key': idempotencyKey,
-            'X-Correlation-Id': `correlation-${randomUUID()}`,
+            'X-Correlation-Id': firstCorrelationId,
           },
           data: requestBody,
         }),
         request.post(orderUrl, {
           headers: {
             'Idempotency-Key': idempotencyKey,
-            'X-Correlation-Id': `correlation-${randomUUID()}`,
+            'X-Correlation-Id': secondCorrelationId,
           },
           data: requestBody,
         }),
@@ -325,33 +427,72 @@ test.describe('POST /orders database consistency', () => {
       if (creationResponse === undefined || replayResponse === undefined) {
         throw new Error('Expected one creation response and one replay.');
       }
+      expect(creationResponse.headers()).not.toHaveProperty(
+        'idempotent-replay',
+      );
       const createdOrder = await readOrder(creationResponse, 201);
       expect(replayResponse.headers()['idempotent-replay']).toBe('true');
       const replayedOrder = await readOrder(replayResponse, 200);
       expect(replayedOrder).toEqual(createdOrder);
       expect(replayedOrder.orderId).toBe(createdOrder.orderId);
 
-      expect(await readCountByKey(idempotencyKey)).toBe(1);
-      const rows = await readRowsByKey(idempotencyKey);
+      expect(await countOrdersByIdempotencyKey(idempotencyKey)).toBe(1);
+      const rows = await readOrderById(createdOrder.orderId);
       expect(rows).toHaveLength(1);
       const row = rows[0];
       expect(row).toBeDefined();
       if (row === undefined) throw new Error('Persisted order was not found.');
-      expectPendingRow(row, createdOrder, idempotencyKey);
+      expectReservedRow(row, createdOrder, idempotencyKey, fixture.sku);
+      const inventoryReservationId = row.inventoryReservationId;
+      if (inventoryReservationId === null) {
+        throw new Error('Persisted Order has no Inventory reservation.');
+      }
 
-      const thirdResponse = await request.post(orderUrl, {
-        headers: {
-          'Idempotency-Key': idempotencyKey,
-          'X-Correlation-Id': `correlation-${randomUUID()}`,
+      const reservationRows =
+        await readInventoryReservationsByOrderId(createdOrder.orderId);
+      expect(await countInventoryReservationsBySku(fixture.sku)).toBe(1);
+      expect(reservationRows).toEqual([
+        {
+          reservationId: inventoryReservationId,
+          orderId: createdOrder.orderId,
+          sku: fixture.sku,
+          quantity: 2,
+          status: 'RESERVED',
+          releaseIdempotencyKey: null,
+          releaseRequestFingerprint: null,
+          releasedAt: null,
         },
-        data: requestBody,
+      ]);
+
+      const productAfterRequests = await readInventoryProduct(fixture.sku);
+      expect(productAfterRequests).toEqual({
+        sku: fixture.sku,
+        totalQuantity: fixture.totalQuantity,
+        reservedQuantity: 2,
+        availableQuantity: fixture.totalQuantity - 2,
       });
-      expect(thirdResponse.status()).toBe(200);
-      expect(thirdResponse.headers()['idempotent-replay']).toBe('true');
-      expect(await thirdResponse.json()).toEqual(createdOrder);
-      expect(await readCountByKey(idempotencyKey)).toBe(1);
+      expect(productAfterRequests?.reservedQuantity).not.toBe(4);
     } finally {
-      await cleanupOrder(idempotencyKey);
+      await cleanupOrderInventoryFixture({
+        idempotencyKey,
+        sku: fixture.sku,
+        totalQuantity: fixture.totalQuantity,
+      });
+
+      const [remainingOrders, remainingReservations, restoredProduct] =
+        await Promise.all([
+          countOrdersByIdempotencyKey(idempotencyKey),
+          countInventoryReservationsBySku(fixture.sku),
+          readInventoryProduct(fixture.sku),
+        ]);
+      expect(remainingOrders).toBe(0);
+      expect(remainingReservations).toBe(0);
+      expect(restoredProduct).toEqual({
+        sku: fixture.sku,
+        totalQuantity: fixture.totalQuantity,
+        reservedQuantity: 0,
+        availableQuantity: fixture.totalQuantity,
+      });
     }
   });
 });

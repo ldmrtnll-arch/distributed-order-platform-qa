@@ -34,6 +34,16 @@ export const orderInventoryFixtures = {
     name: 'Order Database Test Product',
     totalQuantity: 20,
   },
+  databaseReplay: {
+    sku: 'ORDER-DATABASE-REPLAY-001',
+    name: 'Order Database Replay Test Product',
+    totalQuantity: 20,
+  },
+  databaseConcurrent: {
+    sku: 'ORDER-DATABASE-CONCURRENT-001',
+    name: 'Order Database Concurrency Test Product',
+    totalQuantity: 20,
+  },
   resilience: {
     sku: 'ORDER-RESILIENCE-001',
     name: 'Order Resilience Test Product',

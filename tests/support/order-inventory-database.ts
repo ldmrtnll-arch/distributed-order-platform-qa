@@ -16,10 +16,16 @@ export interface InventoryProductRow {
 
 export interface OrderDatabaseRow {
   orderId: string;
+  sku: string;
+  quantity: number;
+  amount: number;
+  currency: string;
   status: string;
   inventoryReservationId: string | null;
   paymentId: string | null;
   failureCode: string | null;
+  idempotencyKey: string;
+  requestFingerprint: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -71,10 +77,16 @@ export async function readOrderById(
   return queryOrderDatabase<OrderDatabaseRow>(
     `SELECT
        order_id AS "orderId",
+       sku,
+       quantity,
+       amount,
+       currency,
        status,
        inventory_reservation_id AS "inventoryReservationId",
        payment_id AS "paymentId",
        failure_code AS "failureCode",
+       idempotency_key AS "idempotencyKey",
+       request_fingerprint AS "requestFingerprint",
        created_at AS "createdAt",
        updated_at AS "updatedAt"
      FROM orders
