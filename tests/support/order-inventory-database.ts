@@ -95,6 +95,30 @@ export async function readOrderById(
   );
 }
 
+export async function readOrderByIdempotencyKey(
+  idempotencyKey: string,
+): Promise<OrderDatabaseRow[]> {
+  return queryOrderDatabase<OrderDatabaseRow>(
+    `SELECT
+       order_id AS "orderId",
+       sku,
+       quantity,
+       amount,
+       currency,
+       status,
+       inventory_reservation_id AS "inventoryReservationId",
+       payment_id AS "paymentId",
+       failure_code AS "failureCode",
+       idempotency_key AS "idempotencyKey",
+       request_fingerprint AS "requestFingerprint",
+       created_at AS "createdAt",
+       updated_at AS "updatedAt"
+     FROM orders
+     WHERE idempotency_key = $1`,
+    [idempotencyKey],
+  );
+}
+
 export async function readInventoryReservationsByOrderId(
   orderId: string,
 ): Promise<InventoryReservationRow[]> {

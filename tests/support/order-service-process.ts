@@ -16,7 +16,14 @@ export interface OrderServiceProcess {
   stop: () => Promise<void>;
 }
 
-export function startOrderService(): OrderServiceProcess {
+interface StartOrderServiceOptions {
+  inventoryRequestTimeoutMs?: number;
+  inventoryServiceUrl?: string;
+}
+
+export function startOrderService(
+  options: StartOrderServiceOptions = {},
+): OrderServiceProcess {
   const child: ChildProcessWithoutNullStreams = spawn(
     process.execPath,
     ['--import', 'tsx', 'services/order-service/src/server.ts'],
@@ -25,6 +32,11 @@ export function startOrderService(): OrderServiceProcess {
       env: {
         ...process.env,
         ORDER_SERVICE_PORT: '3001',
+        INVENTORY_SERVICE_URL:
+          options.inventoryServiceUrl ?? 'http://127.0.0.1:3002',
+        INVENTORY_REQUEST_TIMEOUT_MS: String(
+          options.inventoryRequestTimeoutMs ?? 2000,
+        ),
       },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,

@@ -1,18 +1,40 @@
 import { randomUUID } from 'node:crypto';
 
-import { expect, test, type APIResponse } from '@playwright/test';
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type APIResponse,
+} from '@playwright/test';
 
-import { queryOrderDatabase } from '../../support/database.js';
+import {
+  cleanupOrderInventoryFixture,
+  countInventoryReservationsBySku,
+  countOrdersByIdempotencyKey,
+  readInventoryProduct,
+  readInventoryReservationsByOrderId,
+  readOrderByIdempotencyKey,
+} from '../../support/order-inventory-database.js';
+import { orderInventoryFixtures } from '../../support/order-inventory-fixtures.js';
+import {
+  startInventoryMockServer,
+  type InventoryMockServer,
+} from '../../support/inventory-mock-server.js';
 import {
   getPostgresStatus,
   getRabbitMqStatus,
   startPostgres,
   stopPostgres,
 } from '../../support/docker-compose.js';
-import { isPortReachable } from '../../support/inventory-service-process.js';
+import {
+  isPortReachable,
+  startInventoryService,
+  type InventoryServiceProcess,
+} from '../../support/inventory-service-process.js';
 import {
   isOrderPortReachable,
   startOrderService,
+  type OrderServiceProcess,
 } from '../../support/order-service-process.js';
 
 interface ServiceLog {
@@ -34,22 +56,12 @@ interface OrderResponse {
   createdAt: string;
 }
 
-interface OrderRow {
-  order_id: string;
+interface ResilienceFixture {
   sku: string;
-  quantity: number;
-  amount: number;
-  currency: string;
-  status: string;
-  inventory_reservation_id: string | null;
-  payment_id: string | null;
-  failure_code: string | null;
+  totalQuantity: number;
 }
 
-interface CountRow {
-  count: number;
-}
-
+const inventoryUrl = 'http://127.0.0.1:3002';
 const healthyBody = {
   service: 'order-service',
   status: 'UP',
@@ -60,6 +72,29 @@ const degradedBody = {
   status: 'DEGRADED',
   dependencies: { database: 'DOWN' },
 };
+const inventoryUnavailableBody = {
+  code: 'ORDER_INVENTORY_UNAVAILABLE',
+  message: 'Inventory service is temporarily unavailable.',
+};
+const approvedOrderFields = [
+  'amountInCents',
+  'createdAt',
+  'currency',
+  'orderId',
+  'quantity',
+  'sku',
+  'status',
+];
+
+function createOrderBody(sku: string) {
+  return {
+    sku,
+    quantity: 2,
+    amountInCents: 5990,
+    currency: 'BRL',
+    paymentToken: 'tok_approved',
+  };
+}
 
 async function expectHealth(
   response: APIResponse,
@@ -82,24 +117,19 @@ function parseLogs(rawLogs: string): ServiceLog[] {
   return rawLogs
     .split(/\r?\n/u)
     .filter((line) => line.trim() !== '')
-    .map((line) => JSON.parse(line) as ServiceLog);
+    .flatMap((line) => {
+      try {
+        return [JSON.parse(line) as ServiceLog];
+      } catch {
+        return [];
+      }
+    });
 }
 
-async function countOrders(idempotencyKey: string): Promise<number> {
-  const rows = await queryOrderDatabase<CountRow>(
-    `
-      SELECT COUNT(*)::integer AS count
-      FROM orders
-      WHERE idempotency_key = $1
-    `,
-    [idempotencyKey],
-  );
-  return rows[0]?.count ?? -1;
-}
-
-async function readPendingOrder(
+async function readOrderResponse(
   response: APIResponse,
   expectedStatus: number,
+  expectedOrderStatus: string,
 ): Promise<OrderResponse> {
   expect(response.status()).toBe(expectedStatus);
   expect(response.headers()['content-type']).toMatch(
@@ -107,21 +137,226 @@ async function readPendingOrder(
   );
   expect(response.headers()).not.toHaveProperty('x-powered-by');
   const body = (await response.json()) as OrderResponse;
-  expect(Object.keys(body).sort()).toEqual([
-    'amountInCents',
-    'createdAt',
-    'currency',
-    'orderId',
-    'quantity',
-    'sku',
-    'status',
-  ]);
+  expect(Object.keys(body).sort()).toEqual(approvedOrderFields);
   expect(body.orderId).toMatch(
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
   );
   expect(Number.isNaN(Date.parse(body.createdAt))).toBe(false);
+  expect(body.status).toBe(expectedOrderStatus);
   expect(body).not.toHaveProperty('paymentToken');
+  expect(body).not.toHaveProperty('correlationId');
   return body;
+}
+
+async function expectInventoryUnavailable(response: APIResponse): Promise<void> {
+  expect(response.status()).toBe(503);
+  expect(response.headers()['content-type']).toMatch(
+    /^application\/json(?:;|$)/,
+  );
+  expect(response.headers()).not.toHaveProperty('x-powered-by');
+  expect(response.headers()).not.toHaveProperty('idempotent-replay');
+  const body = (await response.json()) as unknown;
+  expect(body).toEqual(inventoryUnavailableBody);
+  expect(body).not.toHaveProperty('correlationId');
+  expect(JSON.stringify(body)).not.toMatch(
+    /tok_approved|paymentToken|idempotency|password|postgres(?:ql)?:\/\/|connectionstring|stack|\.env|\bsql\b|\bselect\b|\binsert\b|\bupdate\b|\bdelete\b|node_modules|services[\\/]|[a-z]:\\/i,
+  );
+}
+
+async function postOrder(
+  request: APIRequestContext,
+  idempotencyKey: string,
+  correlationId: string,
+  sku: string,
+): Promise<APIResponse> {
+  return request.post('/orders', {
+    headers: {
+      'Idempotency-Key': idempotencyKey,
+      'X-Correlation-Id': correlationId,
+    },
+    data: createOrderBody(sku),
+    timeout: 10_000,
+  });
+}
+
+async function expectInitialState(fixture: ResilienceFixture): Promise<void> {
+  expect(await countInventoryReservationsBySku(fixture.sku)).toBe(0);
+  expect(await readInventoryProduct(fixture.sku)).toEqual({
+    sku: fixture.sku,
+    totalQuantity: fixture.totalQuantity,
+    reservedQuantity: 0,
+    availableQuantity: fixture.totalQuantity,
+  });
+}
+
+async function expectPendingState(
+  idempotencyKey: string,
+  fixture: ResilienceFixture,
+) {
+  expect(await countOrdersByIdempotencyKey(idempotencyKey)).toBe(1);
+  const rows = await readOrderByIdempotencyKey(idempotencyKey);
+  expect(rows).toHaveLength(1);
+  const row = rows[0];
+  expect(row).toBeDefined();
+  expect(row).toMatchObject({
+    sku: fixture.sku,
+    quantity: 2,
+    amount: 5990,
+    currency: 'BRL',
+    status: 'PENDING',
+    inventoryReservationId: null,
+    paymentId: null,
+    failureCode: null,
+    idempotencyKey,
+  });
+  expect(await readInventoryReservationsByOrderId(row!.orderId)).toHaveLength(0);
+  await expectInitialState(fixture);
+  return row!;
+}
+
+async function waitForInventoryHealth(): Promise<void> {
+  await expect
+    .poll(async () => {
+      try {
+        const response = await fetch(`${inventoryUrl}/health`, {
+          signal: AbortSignal.timeout(1000),
+        });
+        return response.status === 200 ? response.json() : null;
+      } catch {
+        return null;
+      }
+    })
+    .toEqual({
+      service: 'inventory-service',
+      status: 'UP',
+      dependencies: { database: 'UP' },
+    });
+}
+
+async function expectRecoveredOrder({
+  firstCorrelationId,
+  fixture,
+  idempotencyKey,
+  pendingCreatedAt,
+  pendingOrderId,
+  request,
+}: {
+  firstCorrelationId: string;
+  fixture: ResilienceFixture;
+  idempotencyKey: string;
+  pendingCreatedAt: Date;
+  pendingOrderId: string;
+  request: APIRequestContext;
+}): Promise<void> {
+  const recoveryCorrelationId = `correlation-${randomUUID()}`;
+  expect(recoveryCorrelationId).not.toBe(firstCorrelationId);
+  const recoveryResponse = await postOrder(
+    request,
+    idempotencyKey,
+    recoveryCorrelationId,
+    fixture.sku,
+  );
+  expect(recoveryResponse.headers()['idempotent-replay']).toBe('true');
+  const recoveredOrder = await readOrderResponse(
+    recoveryResponse,
+    200,
+    'INVENTORY_RESERVED',
+  );
+  expect(recoveredOrder).toEqual({
+    orderId: pendingOrderId,
+    sku: fixture.sku,
+    quantity: 2,
+    amountInCents: 5990,
+    currency: 'BRL',
+    status: 'INVENTORY_RESERVED',
+    createdAt: pendingCreatedAt.toISOString(),
+  });
+
+  const orderRows = await readOrderByIdempotencyKey(idempotencyKey);
+  expect(orderRows).toHaveLength(1);
+  expect(orderRows[0]).toMatchObject({
+    orderId: pendingOrderId,
+    status: 'INVENTORY_RESERVED',
+    paymentId: null,
+    failureCode: null,
+  });
+  expect(orderRows[0]?.inventoryReservationId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
+
+  const reservations = await readInventoryReservationsByOrderId(pendingOrderId);
+  expect(reservations).toHaveLength(1);
+  expect(reservations[0]).toMatchObject({
+    reservationId: orderRows[0]?.inventoryReservationId,
+    orderId: pendingOrderId,
+    sku: fixture.sku,
+    quantity: 2,
+    status: 'RESERVED',
+  });
+  expect(await readInventoryProduct(fixture.sku)).toEqual({
+    sku: fixture.sku,
+    totalQuantity: fixture.totalQuantity,
+    reservedQuantity: 2,
+    availableQuantity: fixture.totalQuantity - 2,
+  });
+
+  const terminalCorrelationId = `correlation-${randomUUID()}`;
+  expect(terminalCorrelationId).not.toBe(firstCorrelationId);
+  expect(terminalCorrelationId).not.toBe(recoveryCorrelationId);
+  const terminalReplayResponse = await postOrder(
+    request,
+    idempotencyKey,
+    terminalCorrelationId,
+    fixture.sku,
+  );
+  expect(terminalReplayResponse.headers()['idempotent-replay']).toBe('true');
+  const terminalOrder = await readOrderResponse(
+    terminalReplayResponse,
+    200,
+    'INVENTORY_RESERVED',
+  );
+  expect(terminalOrder).toEqual(recoveredOrder);
+  expect(await countOrdersByIdempotencyKey(idempotencyKey)).toBe(1);
+  expect(await countInventoryReservationsBySku(fixture.sku)).toBe(1);
+  expect((await readInventoryProduct(fixture.sku))?.reservedQuantity).toBe(2);
+}
+
+function expectMockRequest(
+  mock: InventoryMockServer,
+  correlationId: string,
+  orderId: string,
+  sku: string,
+): void {
+  expect(mock.requests()).toHaveLength(1);
+  const observedRequest = mock.requests()[0];
+  expect(observedRequest).toBeDefined();
+  expect(observedRequest).toMatchObject({
+    method: 'POST',
+    url: '/reservations',
+  });
+  expect(observedRequest?.headers['x-correlation-id']).toBe(correlationId);
+  expect(observedRequest?.headers['idempotency-key']).toBe(
+    `order:${orderId}:inventory-reservation`,
+  );
+  expect(JSON.parse(observedRequest?.body ?? '')).toEqual({
+    orderId,
+    sku,
+    quantity: 2,
+  });
+}
+
+async function cleanupScenario(
+  idempotencyKey: string,
+  fixture: ResilienceFixture,
+): Promise<void> {
+  await cleanupOrderInventoryFixture({
+    idempotencyKey,
+    sku: fixture.sku,
+    totalQuantity: fixture.totalQuantity,
+  });
+  expect(await countOrdersByIdempotencyKey(idempotencyKey)).toBe(0);
+  expect(await countInventoryReservationsBySku(fixture.sku)).toBe(0);
+  await expectInitialState(fixture);
 }
 
 test('returns 503 during a database outage and recovers without restarting', async ({
@@ -130,39 +365,37 @@ test('returns 503 during a database outage and recovers without restarting', asy
   await expect.poll(async () => (await getPostgresStatus()).Health).toBe('healthy');
   await expect.poll(async () => (await getRabbitMqStatus()).Health).toBe('healthy');
 
-  const serviceProcess = startOrderService();
-  const initialPid = serviceProcess.pid;
-  console.log(
-    JSON.stringify({ phase: 'initial', pid: initialPid, isRunning: true }),
-  );
+  const orderProcess = startOrderService({ inventoryServiceUrl: inventoryUrl });
+  const initialPid = orderProcess.pid;
+  console.log(JSON.stringify({ phase: 'initial', pid: initialPid, isRunning: true }));
 
   try {
     await expect.poll(() => isOrderPortReachable()).toBe(true);
     await expectHealth(await request.get('/health'), 200, healthyBody);
-    expect(serviceProcess.isRunning()).toBe(true);
+    expect(orderProcess.isRunning()).toBe(true);
 
     await stopPostgres();
     await expect
       .poll(async () => (await getPostgresStatus()).State.toLowerCase())
       .toMatch(/exited|stopped/u);
     await expect.poll(async () => (await getRabbitMqStatus()).Health).toBe('healthy');
-    expect(serviceProcess.isRunning()).toBe(true);
-    expect(serviceProcess.pid).toBe(initialPid);
+    expect(orderProcess.isRunning()).toBe(true);
+    expect(orderProcess.pid).toBe(initialPid);
     console.log(
       JSON.stringify({
         phase: 'database-outage',
-        pid: serviceProcess.pid,
-        isRunning: serviceProcess.isRunning(),
+        pid: orderProcess.pid,
+        isRunning: orderProcess.isRunning(),
       }),
     );
 
     await expectHealth(await request.get('/health'), 503, degradedBody);
-    expect(serviceProcess.isRunning()).toBe(true);
-    expect(serviceProcess.pid).toBe(initialPid);
+    expect(orderProcess.isRunning()).toBe(true);
+    expect(orderProcess.pid).toBe(initialPid);
 
     await expect
       .poll(() =>
-        parseLogs(serviceProcess.logs()).some(
+        parseLogs(orderProcess.logs()).some(
           (entry) =>
             entry.level === 'error' &&
             entry.service === 'order-service' &&
@@ -171,7 +404,7 @@ test('returns 503 during a database outage and recovers without restarting', asy
         ),
       )
       .toBe(true);
-    const errorLogs = parseLogs(serviceProcess.logs()).filter(
+    const errorLogs = parseLogs(orderProcess.logs()).filter(
       (entry) => entry.level === 'error',
     );
     expect(errorLogs.length).toBeGreaterThan(0);
@@ -199,228 +432,245 @@ test('returns 503 during a database outage and recovers without restarting', asy
       })
       .toEqual(healthyBody);
     await expect.poll(async () => (await getRabbitMqStatus()).Health).toBe('healthy');
-    expect(serviceProcess.isRunning()).toBe(true);
-    expect(serviceProcess.pid).toBe(initialPid);
+    expect(orderProcess.isRunning()).toBe(true);
+    expect(orderProcess.pid).toBe(initialPid);
     await expectHealth(await request.get('/health'), 200, healthyBody);
     console.log(
       JSON.stringify({
         phase: 'recovered',
-        pid: serviceProcess.pid,
-        isRunning: serviceProcess.isRunning(),
+        pid: orderProcess.pid,
+        isRunning: orderProcess.isRunning(),
       }),
     );
   } finally {
     await startPostgres();
     await expect.poll(async () => (await getPostgresStatus()).Health).toBe('healthy');
     await expect.poll(async () => (await getRabbitMqStatus()).Health).toBe('healthy');
-    await serviceProcess.stop();
+    await orderProcess.stop();
     await expect.poll(() => isOrderPortReachable()).toBe(false);
     await expect.poll(() => isPortReachable(3002)).toBe(false);
     await expect.poll(() => isPortReachable(3003)).toBe(false);
   }
 });
 
-test('recovers order creation after a database outage without consuming the idempotency key', async ({
+test('recovers a pending order after Inventory becomes available', async ({
   request,
 }) => {
-  const initialIdempotencyKey = `resilience-order-create-${randomUUID()}`;
-  const outageIdempotencyKey = `resilience-order-create-${randomUUID()}`;
-  const requestBody = {
-    sku: 'RESILIENCE-ORDER-001',
-    quantity: 2,
-    amountInCents: 8990,
-    currency: 'BRL',
-    paymentToken: 'tok_approved',
-  };
+  const fixture = orderInventoryFixtures.resilience;
+  const idempotencyKey = `order-resilience-unavailable-${randomUUID()}`;
+  const firstCorrelationId = `correlation-${randomUUID()}`;
+  let inventoryProcess: InventoryServiceProcess | undefined;
 
-  await expect.poll(async () => (await getPostgresStatus()).Health).toBe('healthy');
+  await cleanupScenario(idempotencyKey, fixture);
   await expect.poll(async () => (await getRabbitMqStatus()).Health).toBe('healthy');
-
-  const serviceProcess = startOrderService();
-  const initialPid = serviceProcess.pid;
-  console.log(
-    JSON.stringify({ phase: 'initial', pid: initialPid, isRunning: true }),
-  );
+  await expect.poll(() => isPortReachable(3002)).toBe(false);
+  const orderProcess = startOrderService({ inventoryServiceUrl: inventoryUrl });
 
   try {
     await expect.poll(() => isOrderPortReachable()).toBe(true);
-    await expectHealth(await request.get('/health'), 200, healthyBody);
-    expect(serviceProcess.isRunning()).toBe(true);
+    const unavailableResponse = await postOrder(
+      request,
+      idempotencyKey,
+      firstCorrelationId,
+      fixture.sku,
+    );
+    await expectInventoryUnavailable(unavailableResponse);
+    const pendingOrder = await expectPendingState(idempotencyKey, fixture);
 
-    const initialCreationResponse = await request.post('/orders', {
-      headers: {
-        'Idempotency-Key': initialIdempotencyKey,
-        'X-Correlation-Id': `correlation-${randomUUID()}`,
-      },
-      data: requestBody,
+    inventoryProcess = startInventoryService();
+    await waitForInventoryHealth();
+    await expectRecoveredOrder({
+      firstCorrelationId,
+      fixture,
+      idempotencyKey,
+      pendingCreatedAt: pendingOrder.createdAt,
+      pendingOrderId: pendingOrder.orderId,
+      request,
     });
-    expect(initialCreationResponse.headers()).not.toHaveProperty(
-      'idempotent-replay',
-    );
-    const initialOrder = await readPendingOrder(initialCreationResponse, 201);
-    expect(initialOrder).toMatchObject({
-      sku: 'RESILIENCE-ORDER-001',
-      quantity: 2,
-      amountInCents: 8990,
-      currency: 'BRL',
-      status: 'PENDING',
-    });
-
-    await stopPostgres();
-    await expect
-      .poll(async () => (await getPostgresStatus()).State.toLowerCase())
-      .toMatch(/exited|stopped/u);
-    expect(serviceProcess.isRunning()).toBe(true);
-    expect(serviceProcess.pid).toBe(initialPid);
-
-    const unavailableResponse = await request.post('/orders', {
-      headers: {
-        'Idempotency-Key': outageIdempotencyKey,
-        'X-Correlation-Id': `correlation-${randomUUID()}`,
-      },
-      data: requestBody,
-    });
-    expect(unavailableResponse.status()).toBe(503);
-    expect(unavailableResponse.headers()['content-type']).toMatch(
-      /^application\/json(?:;|$)/,
-    );
-    expect(unavailableResponse.headers()).not.toHaveProperty('x-powered-by');
-    expect(unavailableResponse.headers()).not.toHaveProperty(
-      'idempotent-replay',
-    );
-    const unavailableBody = (await unavailableResponse.json()) as unknown;
-    expect(unavailableBody).toEqual({
-      code: 'ORDER_DATABASE_UNAVAILABLE',
-      message: 'Order data is temporarily unavailable.',
-    });
-    const serializedUnavailableBody = JSON.stringify(unavailableBody);
-    expect(serializedUnavailableBody).not.toContain('tok_approved');
-    expect(serializedUnavailableBody).not.toContain(outageIdempotencyKey);
-    expect(serializedUnavailableBody).not.toMatch(
-      /orderId|paymentToken|fingerprint|requestFingerprint|password|postgres(?:ql)?:\/\/[^\s"]+@|connectionstring|stack|\.env|\bselect\b|\binsert\b|\bupdate\b|\bdelete\b|node_modules|services[\\/]|[a-z]:\\/i,
-    );
-    expect(serviceProcess.isRunning()).toBe(true);
-    expect(serviceProcess.pid).toBe(initialPid);
-    console.log(
-      JSON.stringify({
-        phase: 'database-outage',
-        pid: serviceProcess.pid,
-        isRunning: serviceProcess.isRunning(),
-      }),
-    );
-
-    await startPostgres();
-    await expect.poll(async () => (await getPostgresStatus()).Health).toBe('healthy');
-    await expect
-      .poll(async () => {
-        try {
-          const response = await request.get('/health');
-          return response.status() === 200 ? response.json() : null;
-        } catch {
-          return null;
-        }
-      })
-      .toEqual(healthyBody);
-    expect(serviceProcess.isRunning()).toBe(true);
-    expect(serviceProcess.pid).toBe(initialPid);
-    await expectHealth(await request.get('/health'), 200, healthyBody);
-
-    expect(await countOrders(outageIdempotencyKey)).toBe(0);
-
-    const recoveredCreationResponse = await request.post('/orders', {
-      headers: {
-        'Idempotency-Key': outageIdempotencyKey,
-        'X-Correlation-Id': `correlation-${randomUUID()}`,
-      },
-      data: requestBody,
-    });
-    expect(recoveredCreationResponse.headers()).not.toHaveProperty(
-      'idempotent-replay',
-    );
-    const recoveredOrder = await readPendingOrder(
-      recoveredCreationResponse,
-      201,
-    );
-    expect(recoveredOrder).toEqual({
-      orderId: recoveredOrder.orderId,
-      sku: 'RESILIENCE-ORDER-001',
-      quantity: 2,
-      amountInCents: 8990,
-      currency: 'BRL',
-      status: 'PENDING',
-      createdAt: recoveredOrder.createdAt,
-    });
-
-    expect(await countOrders(outageIdempotencyKey)).toBe(1);
-    const persistedRows = await queryOrderDatabase<OrderRow>(
-      `
-        SELECT
-          order_id,
-          sku,
-          quantity,
-          amount,
-          currency,
-          status,
-          inventory_reservation_id,
-          payment_id,
-          failure_code
-        FROM orders
-        WHERE idempotency_key = $1
-      `,
-      [outageIdempotencyKey],
-    );
-    expect(persistedRows).toHaveLength(1);
-    expect(persistedRows[0]).toEqual({
-      order_id: recoveredOrder.orderId,
-      sku: 'RESILIENCE-ORDER-001',
-      quantity: 2,
-      amount: 8990,
-      currency: 'BRL',
-      status: 'PENDING',
-      inventory_reservation_id: null,
-      payment_id: null,
-      failure_code: null,
-    });
-
-    const replayResponse = await request.post('/orders', {
-      headers: {
-        'Idempotency-Key': outageIdempotencyKey,
-        'X-Correlation-Id': `correlation-${randomUUID()}`,
-      },
-      data: requestBody,
-    });
-    expect(replayResponse.headers()['idempotent-replay']).toBe('true');
-    const replayedOrder = await readPendingOrder(replayResponse, 200);
-    expect(replayedOrder).toEqual(recoveredOrder);
-    expect(replayedOrder.orderId).toBe(recoveredOrder.orderId);
-    expect(replayedOrder.createdAt).toBe(recoveredOrder.createdAt);
-    expect(await countOrders(outageIdempotencyKey)).toBe(1);
-
-    expect(serviceProcess.isRunning()).toBe(true);
-    expect(serviceProcess.pid).toBe(initialPid);
-    console.log(
-      JSON.stringify({
-        phase: 'recovered',
-        pid: serviceProcess.pid,
-        isRunning: serviceProcess.isRunning(),
-        failedOrderRows: 0,
-        recoveredOrderRows: 1,
-        finalOrderRows: 1,
-      }),
-    );
   } finally {
-    await startPostgres();
-    await expect.poll(async () => (await getPostgresStatus()).Health).toBe('healthy');
-    await queryOrderDatabase(
-      'DELETE FROM orders WHERE idempotency_key = ANY($1::text[])',
-      [[initialIdempotencyKey, outageIdempotencyKey]],
-    );
-    expect(await countOrders(initialIdempotencyKey)).toBe(0);
-    expect(await countOrders(outageIdempotencyKey)).toBe(0);
-    await expect.poll(async () => (await getRabbitMqStatus()).Health).toBe('healthy');
-    await serviceProcess.stop();
+    await inventoryProcess?.stop();
+    await orderProcess.stop();
+    await cleanupScenario(idempotencyKey, fixture);
     await expect.poll(() => isOrderPortReachable()).toBe(false);
     await expect.poll(() => isPortReachable(3002)).toBe(false);
     await expect.poll(() => isPortReachable(3003)).toBe(false);
+  }
+});
+
+test('keeps an order pending after an Inventory timeout and recovers without retrying automatically', async ({
+  request,
+}) => {
+  const fixture = orderInventoryFixtures.resilienceTimeout;
+  const idempotencyKey = `order-resilience-timeout-${randomUUID()}`;
+  const firstCorrelationId = `correlation-${randomUUID()}`;
+  let mock: InventoryMockServer | undefined;
+  let inventoryProcess: InventoryServiceProcess | undefined;
+  let orderProcess: OrderServiceProcess | undefined;
+
+  await cleanupScenario(idempotencyKey, fixture);
+
+  try {
+    mock = await startInventoryMockServer({
+      response: { status: 201, body: { status: 'RESERVED' }, delayMs: 750 },
+    });
+    orderProcess = startOrderService({
+      inventoryServiceUrl: inventoryUrl,
+      inventoryRequestTimeoutMs: 200,
+    });
+    await expect.poll(() => isOrderPortReachable()).toBe(true);
+
+    const unavailableResponse = await postOrder(
+      request,
+      idempotencyKey,
+      firstCorrelationId,
+      fixture.sku,
+    );
+    await expectInventoryUnavailable(unavailableResponse);
+    const pendingOrder = await expectPendingState(idempotencyKey, fixture);
+    await expect.poll(() => mock?.requests().length).toBe(1);
+    expectMockRequest(
+      mock,
+      firstCorrelationId,
+      pendingOrder.orderId,
+      fixture.sku,
+    );
+
+    await mock.stop();
+    mock = undefined;
+    inventoryProcess = startInventoryService();
+    await waitForInventoryHealth();
+    await expectRecoveredOrder({
+      firstCorrelationId,
+      fixture,
+      idempotencyKey,
+      pendingCreatedAt: pendingOrder.createdAt,
+      pendingOrderId: pendingOrder.orderId,
+      request,
+    });
+  } finally {
+    await inventoryProcess?.stop();
+    await mock?.stop();
+    await orderProcess?.stop();
+    await cleanupScenario(idempotencyKey, fixture);
+    await expect.poll(() => isOrderPortReachable()).toBe(false);
+    await expect.poll(() => isPortReachable(3002)).toBe(false);
+  }
+});
+
+test('keeps an order pending after an unexpected Inventory 409 and recovers', async ({
+  request,
+}) => {
+  const fixture = orderInventoryFixtures.resilienceUnexpected409;
+  const idempotencyKey = `order-resilience-unexpected-409-${randomUUID()}`;
+  const firstCorrelationId = `correlation-${randomUUID()}`;
+  let mock: InventoryMockServer | undefined;
+  let inventoryProcess: InventoryServiceProcess | undefined;
+  let orderProcess: OrderServiceProcess | undefined;
+
+  await cleanupScenario(idempotencyKey, fixture);
+
+  try {
+    mock = await startInventoryMockServer({
+      response: {
+        status: 409,
+        body: {
+          code: 'IDEMPOTENCY_KEY_CONFLICT',
+          message: 'The idempotency key was already used with a different request.',
+        },
+      },
+    });
+    orderProcess = startOrderService({ inventoryServiceUrl: inventoryUrl });
+    await expect.poll(() => isOrderPortReachable()).toBe(true);
+
+    const unavailableResponse = await postOrder(
+      request,
+      idempotencyKey,
+      firstCorrelationId,
+      fixture.sku,
+    );
+    await expectInventoryUnavailable(unavailableResponse);
+    const pendingOrder = await expectPendingState(idempotencyKey, fixture);
+    expectMockRequest(
+      mock,
+      firstCorrelationId,
+      pendingOrder.orderId,
+      fixture.sku,
+    );
+
+    await mock.stop();
+    mock = undefined;
+    inventoryProcess = startInventoryService();
+    await waitForInventoryHealth();
+    await expectRecoveredOrder({
+      firstCorrelationId,
+      fixture,
+      idempotencyKey,
+      pendingCreatedAt: pendingOrder.createdAt,
+      pendingOrderId: pendingOrder.orderId,
+      request,
+    });
+  } finally {
+    await inventoryProcess?.stop();
+    await mock?.stop();
+    await orderProcess?.stop();
+    await cleanupScenario(idempotencyKey, fixture);
+    await expect.poll(() => isOrderPortReachable()).toBe(false);
+    await expect.poll(() => isPortReachable(3002)).toBe(false);
+  }
+});
+
+test('keeps an order pending after an invalid Inventory success contract and recovers', async ({
+  request,
+}) => {
+  const fixture = orderInventoryFixtures.resilienceInvalidContract;
+  const idempotencyKey = `order-resilience-invalid-contract-${randomUUID()}`;
+  const firstCorrelationId = `correlation-${randomUUID()}`;
+  let mock: InventoryMockServer | undefined;
+  let inventoryProcess: InventoryServiceProcess | undefined;
+  let orderProcess: OrderServiceProcess | undefined;
+
+  await cleanupScenario(idempotencyKey, fixture);
+
+  try {
+    mock = await startInventoryMockServer({
+      response: { status: 201, body: { status: 'RESERVED' } },
+    });
+    orderProcess = startOrderService({ inventoryServiceUrl: inventoryUrl });
+    await expect.poll(() => isOrderPortReachable()).toBe(true);
+
+    const unavailableResponse = await postOrder(
+      request,
+      idempotencyKey,
+      firstCorrelationId,
+      fixture.sku,
+    );
+    await expectInventoryUnavailable(unavailableResponse);
+    const pendingOrder = await expectPendingState(idempotencyKey, fixture);
+    expectMockRequest(
+      mock,
+      firstCorrelationId,
+      pendingOrder.orderId,
+      fixture.sku,
+    );
+
+    await mock.stop();
+    mock = undefined;
+    inventoryProcess = startInventoryService();
+    await waitForInventoryHealth();
+    await expectRecoveredOrder({
+      firstCorrelationId,
+      fixture,
+      idempotencyKey,
+      pendingCreatedAt: pendingOrder.createdAt,
+      pendingOrderId: pendingOrder.orderId,
+      request,
+    });
+  } finally {
+    await inventoryProcess?.stop();
+    await mock?.stop();
+    await orderProcess?.stop();
+    await cleanupScenario(idempotencyKey, fixture);
+    await expect.poll(() => isOrderPortReachable()).toBe(false);
+    await expect.poll(() => isPortReachable(3002)).toBe(false);
   }
 });

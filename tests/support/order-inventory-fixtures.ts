@@ -49,6 +49,21 @@ export const orderInventoryFixtures = {
     name: 'Order Resilience Test Product',
     totalQuantity: 20,
   },
+  resilienceTimeout: {
+    sku: 'ORDER-RESILIENCE-TIMEOUT-001',
+    name: 'Order Resilience Timeout Test Product',
+    totalQuantity: 20,
+  },
+  resilienceUnexpected409: {
+    sku: 'ORDER-RESILIENCE-UNEXPECTED-409-001',
+    name: 'Order Resilience Unexpected 409 Test Product',
+    totalQuantity: 20,
+  },
+  resilienceInvalidContract: {
+    sku: 'ORDER-RESILIENCE-INVALID-CONTRACT-001',
+    name: 'Order Resilience Invalid Contract Test Product',
+    totalQuantity: 20,
+  },
   insufficientStock: {
     sku: 'ORDER-INSUFFICIENT-001',
     name: 'Order Insufficient Stock Test Product',
