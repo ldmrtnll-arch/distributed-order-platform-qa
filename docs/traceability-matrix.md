@@ -17,5 +17,5 @@
 | REQ-PERF-001 | Approved Order smoke with functional checks | `performance/scripts/smoke.js` | Performance | Covered/passed locally |
 | REQ-PERF-002 | Moderate load meets laboratory thresholds | `performance/scripts/order-load.js` | Performance | Covered/passed locally |
 | REQ-PERF-003 | Concurrent replay remains idempotent | `performance/scripts/order-concurrency.js` | Performance | Covered/passed locally |
-| REQ-CI-001 | Automate quality, normal, events, and smoke | `.github/workflows/ci.yml` | CI configuration | Configured; remote result not claimed |
-| REQ-CI-002 | Provide manual resilience and full performance runs | Resilience/performance workflows | CI configuration | Configured; remote result not claimed |
+| REQ-CI-001 | Automate quality, normal, events, and smoke | `.github/workflows/ci.yml` | CI configuration | Covered; final PR workflow passed |
+| REQ-CI-002 | Provide manual resilience and full performance runs | Resilience/performance workflows | CI configuration | Configured; underlying suites passed locally |

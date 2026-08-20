@@ -1,4 +1,6 @@
-# Project Status
+# Project Status — COMPLETED
+
+The portfolio scope is complete and its final pull-request CI workflow passed. Items outside the implemented boundary are optional future evolution, not unfinished acceptance criteria.
 
 ## Completed scope
 
@@ -43,7 +45,7 @@ Results executed on 2026-08-20 while finalizing Order events and Notification:
 
 The normal Playwright configuration excludes `tests/events/**` and `tests/resilience/**`. Messaging and infrastructure-failure suites use one worker because they control service ports and dependency availability.
 
-The finalization baseline and post-change results are consolidated in [Test Execution Report](test-execution-report.md). The measured local K6 smoke, load, and concurrency results, including thresholds and environment limitations, are in [Performance Report](performance-report.md). GitHub workflows are configured, but this document does not claim a remote result before GitHub executes them.
+The finalization baseline and post-change results are consolidated in [Test Execution Report](test-execution-report.md). The measured local K6 smoke, load, and concurrency results, including thresholds and environment limitations, are in [Performance Report](performance-report.md). The final pull-request GitHub Actions workflow passed; no unsupported remote duration or run metadata is claimed.
 
 ## Event delivery evidence
 
@@ -64,6 +66,7 @@ The finalization baseline and post-change results are consolidated in [Test Exec
 * The existing Order database-outage test initially rejected the publisher's new sanitized `publish-order-events` log. Its operation whitelist was extended while retaining secret/stack checks.
 * Publisher shutdown originally closed the AMQP channel before an active poll completed. Shutdown now waits for the poll before closing its known resources.
 * Docker K6 initially could not reach the host on Windows because an explicit host-gateway alias replaced Docker Desktop's native mapping. The runner now uses native `host.docker.internal` on Windows and host networking on Linux.
+* A clean GitHub Actions runner exposed a hidden dependency on Notification schema state: the normal suite used Notification cleanup without creating its schema. The normal global setup now owns that database preparation and the corrected workflow passed.
 
 ## Decisions
 
@@ -77,8 +80,10 @@ The finalization baseline and post-change results are consolidated in [Test Exec
 * Laboratory thresholds are `http_req_failed < 1%`, functional checks and confirmed Orders above 99%, p95 below 750 ms, and p99 below 1500 ms; they are regression criteria, not production SLOs.
 * Resilience and the full K6 sequence are manually dispatched in CI because they are infrastructure-exclusive or intentionally heavier than pull-request feedback.
 
-## Next steps
+## Optional future evolution
 
-1. Observe the first remote GitHub Actions runs and tune only evidence-based runner-specific issues.
-2. Use the documented suites and reports during portfolio review and technical interviews.
-3. Treat production observability, deployment, and external-provider integrations as future projects rather than expanding this QA portfolio branch.
+1. Add distributed tracing for cross-service diagnostics.
+2. Evaluate delayed retry queues and exponential backoff.
+3. Simulate a realistic external notification provider.
+4. Evaluate Testcontainers for stronger per-run infrastructure isolation.
+5. Exercise the system in a controlled cloud environment.

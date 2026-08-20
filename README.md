@@ -1,30 +1,30 @@
-# Distributed Order Platform QA
+# Distributed Order Platform — QA Portfolio Project
 
 [![CI](https://github.com/ldmrtnll-arch/distributed-order-platform-qa/actions/workflows/ci.yml/badge.svg)](https://github.com/ldmrtnll-arch/distributed-order-platform-qa/actions/workflows/ci.yml)
 
 ## Overview
 
-Portfolio project for testing a distributed order-processing platform. It demonstrates QA Automation across REST APIs, independent databases, synchronous microservice integration, asynchronous events, controlled failures, performance, and CI/CD.
+Portfolio laboratory for testing a distributed order-processing platform. It demonstrates practical Quality Engineering across REST APIs, independent databases, synchronous microservice integration, asynchronous events, controlled failures, performance, and CI/CD.
 
-The badge reflects GitHub's live result. The workflows are configured in this repository; no remote run is claimed by the documentation itself.
+**QA focus:** API Testing · Integration Testing · Database Testing · Event-Driven Testing · Resilience Testing · Performance Testing · CI/CD
+
+The badge reflects GitHub's live result. The workflow was validated successfully on the final project pull request.
 
 ## Architecture
 
 The client calls Order, which synchronously reserves Inventory and processes Payment. Every terminal Order transition creates an event in a transactional Outbox. A background publisher sends it through RabbitMQ and Notification validates and persists it idempotently.
 
 ```text
-Client
-  |
-Order -------- Inventory ---- inventory_db
-  |
-  |   -------- Payment ------ payments_db
-  |
-  +---- orders_db / Outbox
-                  |
-               RabbitMQ
-                  |
-              Notification --- notifications_db
+Synchronous request flow
+Client -> Order -> Inventory -> inventory_db
+                -> Payment   -> payments_db
+
+Asynchronous terminal-event flow
+Order transaction -> orders_db + Transactional Outbox
+                  -> RabbitMQ -> Notification -> notifications_db
 ```
+
+The main path is `POST /orders` → Inventory reservation → Payment → `CONFIRMED` → Outbox → RabbitMQ → Notification. Inventory rejection ends as `INVENTORY_REJECTED`; Payment decline releases Inventory and ends as `PAYMENT_DECLINED`; a release failure ends as `COMPENSATION_FAILED`.
 
 See [System Architecture](docs/architecture.md) for state transitions, delivery semantics, topology, and trade-offs.
 
@@ -40,18 +40,40 @@ See [System Architecture](docs/architecture.md) for state transitions, delivery 
 * K6 smoke, moderate load, and concurrency/idempotency performance;
 * GitHub Actions quality, functional, event, resilience, and performance pipelines.
 
+## Why these tests matter
+
+* Idempotency and concurrency checks prove that retries and simultaneous requests do not duplicate business effects.
+* Direct database assertions verify constraints and distributed side effects that an HTTP response alone cannot prove.
+* Business rejections are distinguished from technical outages because they require different states, responses, and recovery behavior.
+* Cross-service checks validate Order, Inventory, Payment, Outbox, RabbitMQ, and Notification as one observable workflow without assuming a global transaction.
+* Scenario-owned fixtures and `finally` cleanup keep parallel runs independent and preserve cleanup after assertion failures.
+* Bounded polling observes health and eventual consistency without fragile fixed waits.
+* Resilience suites are serial because they deliberately control shared ports, processes, and containers.
+* K6 thresholds provide a repeatable regression baseline for the documented laboratory profile, not a production capacity claim.
+
 ## Technologies
 
 TypeScript, Node.js, Express, Playwright, PostgreSQL, RabbitMQ, Docker Compose, JSON Schema/Ajv, K6, and GitHub Actions.
 
-## Commands
+## Quick start
 
-Start infrastructure and wait for real health checks:
+Prerequisites: Git, Node.js 22+, npm 10+, and Docker Desktop or Docker Engine with Compose. K6 runs in Docker and does not need a global installation.
 
 ```text
-npm run docker:up
+git clone https://github.com/ldmrtnll-arch/distributed-order-platform-qa.git
+cd distributed-order-platform-qa
+npm ci
+```
+
+Copy `.env.example` to `.env`, then start infrastructure and wait for real health checks:
+
+```text
+Copy-Item .env.example .env
+docker compose up -d
 npm run infra:wait
 ```
+
+On a POSIX shell, use `cp .env.example .env` instead of `Copy-Item`.
 
 Static and functional validation:
 
@@ -105,6 +127,7 @@ Consolidated evidence is available in:
 * [Traceability Matrix](docs/traceability-matrix.md)
 * [Risks and Limitations](docs/risks-and-limitations.md)
 * [Bug Reports](docs/bug-reports.md)
+* [Project Status](docs/project-status.md)
 
 ## Known limitations
 
