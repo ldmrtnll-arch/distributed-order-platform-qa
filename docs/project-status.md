@@ -1,88 +1,66 @@
 # Project Status
 
-## Completed Steps
+## Completed scope
 
-* Defined the distributed order-processing scenario.
-* Defined the main services and their responsibilities.
-* Selected the initial technology stack.
-* Preserved the complete integration and microservices testing scope.
-* Created the local Git repository.
-* Configured the initial Git workflow.
-* Created the documentation baseline.
-* Selected a hybrid orchestration architecture.
-* Defined synchronous REST communication between services.
-* Defined asynchronous event communication through RabbitMQ.
-* Defined logical database ownership for each service.
-* Documented the successful, rejected, declined, and technical failure flows.
-* Documented the initial idempotency, retry, timeout, compensation, and traceability requirements.
+* Docker Compose infrastructure with healthy PostgreSQL and RabbitMQ services.
+* Independent Inventory, Payment, and Order services using TypeScript and PostgreSQL.
+* Inventory lookup, reservation, release, idempotency, concurrency, database, and resilience coverage.
+* Payment approval/decline, idempotency, concurrency, database, and resilience coverage as an independent service.
+* Order creation, validation, idempotency conflicts, and database consistency coverage.
+* Synchronous Order-to-Inventory reservation through REST.
+* Propagation of `X-Correlation-Id` and internal Inventory idempotency key `order:<orderId>:inventory-reservation`.
+* Order state transitions from `PENDING` to `INVENTORY_RESERVED` or terminal `INVENTORY_REJECTED`.
+* Recoverable `PENDING` state for Inventory unavailability, timeout, unexpected `409`, and invalid success contract.
+* Idempotent recovery, concurrent Order creation, and cross-database consistency validation.
 
-## Current Step
+## Current implementation boundary
 
-Review and commit the planned system architecture.
+Order currently orchestrates only the Inventory reservation stage. Payment is implemented and tested separately, but is not called by Order. RabbitMQ is running as infrastructure; event publication, consumers, compensation, and Notification Service are not implemented yet.
 
-## Next Steps
+## Test execution evidence
 
-1. Define the repository folder structure.
-2. Verify the local development prerequisites.
-3. Create the initial Node.js and TypeScript configuration.
-4. Prepare the Docker Compose infrastructure.
-5. Start PostgreSQL and RabbitMQ.
-6. Implement the Order Service incrementally.
-7. Implement the Inventory Service incrementally.
-8. Implement the Payment Service incrementally.
-9. Implement the Notification Service incrementally.
-10. Create the test plan and test strategy.
-11. Implement API and integration tests.
-12. Validate database consistency.
-13. Test asynchronous events.
-14. Implement contract validation.
-15. Test idempotency, retry, timeout, and dependency failures.
-16. Add execution evidence and reports.
-17. Configure GitHub Actions.
-18. Review the repository before publication.
+Results executed on 2026-08-20 while finalizing the Order-to-Inventory integration:
 
-## Pending Items
+| Suite | Command | Result |
+| --- | --- | --- |
+| TypeScript workspaces | `npm run typecheck` | 4 workspaces passed |
+| Order resilience, run 1 | `npm run test:resilience:order` | 5 passed in 14.7s |
+| Order resilience, run 2 | `npm run test:resilience:order` | 5 passed in 14.4s |
+| Order API | `npx playwright test --config tests/playwright.config.ts tests/api/order/orders.spec.ts` | 38 passed in 3.9s |
+| Order database | `npx playwright test --config tests/playwright.config.ts tests/database/order/orders-database.spec.ts` | 3 passed in 3.6s |
+| Normal Playwright suite | `npm test` | 121 passed in 4.5s |
 
-* Repository source-code structure.
-* Environment prerequisite verification.
-* Infrastructure configuration.
-* Service implementation.
-* Database initialization.
-* RabbitMQ configuration.
-* Test documentation.
-* Automated test implementation.
-* CI pipeline.
-* Execution evidence.
-* Final README.
-* Portuguese README version.
+The normal Playwright configuration intentionally excludes `tests/resilience/**`. Infrastructure-failure tests run with one worker because they take exclusive control of service ports and PostgreSQL availability.
+
+## Order resilience scenarios
+
+* Order health degrades to `503` while its database is stopped and recovers without restarting the process.
+* Inventory unavailable leaves one recoverable `PENDING` Order and no reservation, then succeeds with the same idempotency key.
+* A real 200ms Inventory timeout produces one outbound request, no implicit retry, and successful recovery against real Inventory.
+* An unexpected Inventory idempotency-conflict `409` is treated as technical failure rather than `INVENTORY_REJECTED`.
+* A `201` response with an invalid reservation body is rejected as an incompatible dependency contract.
+* Each recovery uses a new correlation ID while preserving the Order fingerprint and propagates the current correlation ID to Inventory.
+* Terminal replay preserves one Order, one reservation, and `reserved_quantity = 2` rather than incrementing it to `4`.
+
+## Problems found and learnings
+
+An earlier cross-database suite used a global `afterAll` assertion while its tests ran in parallel workers. One worker could observe another worker's still-active fixture, causing a race condition despite correct cleanup. The global assertion was replaced with cleanup and residual-state validation isolated to each scenario.
+
+No backend defect was found during the resilience implementation. The existing Order client already classified transport failures, timeout, unexpected status, and invalid response bodies as technical Inventory failures while preserving `PENDING`.
+
+## Next steps
+
+1. Integrate Payment into the Order workflow.
+2. Implement compensation when a later workflow stage fails.
+3. Publish and validate RabbitMQ domain events.
+4. Implement Notification Service and consumer idempotency.
+5. Add contract schemas, CI execution, and broader performance coverage.
 
 ## Decisions
 
-* The project will maintain its complete microservices testing scope.
-* The application will simulate a realistic e-commerce order flow.
-* The Order Service will orchestrate the main order workflow.
-* Synchronous service communication will use REST APIs.
-* Asynchronous domain communication will use RabbitMQ.
-* Each service will own a logical PostgreSQL database.
-* One PostgreSQL container may host the logical databases locally.
-* Docker Compose will provide a reproducible development environment.
-* Requests and events will propagate a correlation ID.
-* Retryable operations will use idempotency protection.
-* Inventory compensation will occur after payment failure or decline.
-* Tests and services will be implemented incrementally.
-* Test results will never be documented as successful without actual execution evidence.
-
-## Problems Found
-
-No technical implementation problems have been found yet.
-
-The Git line-ending warnings are expected on Windows and do not indicate corrupted files or failed commits.
-
-## Project Learnings
-
-* Distributed system testing must validate the complete business workflow, not only isolated HTTP responses.
-* Synchronous and asynchronous integrations introduce different failure and consistency risks.
-* Idempotency protects the platform against duplicate processing caused by retries.
-* Compensation is necessary when one step succeeds and a later step fails.
-* Correlation IDs make an operation traceable across APIs, events, databases, and logs.
-* Testability must be considered during system design rather than added only after implementation.
+* Each service owns its logical PostgreSQL database.
+* Technical Inventory failures keep an Order recoverable as `PENDING`.
+* Recognized Inventory business failures are terminal as `INVENTORY_REJECTED`.
+* Correlation ID is traceability metadata and does not participate in the Order request fingerprint.
+* No automatic Inventory retry is implemented yet.
+* Test results are documented only after actual execution.
