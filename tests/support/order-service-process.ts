@@ -21,6 +21,8 @@ interface StartOrderServiceOptions {
   inventoryServiceUrl?: string;
   paymentRequestTimeoutMs?: number;
   paymentServiceUrl?: string;
+  rabbitMqUrl?: string;
+  orderEventPublishIntervalMs?: number;
 }
 
 export function startOrderService(
@@ -43,6 +45,13 @@ export function startOrderService(
           options.paymentServiceUrl ?? 'http://127.0.0.1:3003',
         PAYMENT_REQUEST_TIMEOUT_MS: String(
           options.paymentRequestTimeoutMs ?? 2000,
+        ),
+        RABBITMQ_URL:
+          options.rabbitMqUrl ??
+          'amqp://qa_user:qa_password@127.0.0.1:5672/qa',
+        ORDER_EVENTS_EXCHANGE: 'order.events',
+        ORDER_EVENT_PUBLISH_INTERVAL_MS: String(
+          options.orderEventPublishIntervalMs ?? 200,
         ),
       },
       stdio: ['pipe', 'pipe', 'pipe'],

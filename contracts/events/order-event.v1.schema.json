@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://distributed-order-platform.local/contracts/events/order-event.v1.schema.json",
+  "title": "Order terminal event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "eventId",
+    "eventType",
+    "eventVersion",
+    "occurredAt",
+    "correlationId",
+    "orderId",
+    "data"
+  ],
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "eventType": {
+      "enum": [
+        "ORDER_CONFIRMED",
+        "ORDER_INVENTORY_REJECTED",
+        "ORDER_PAYMENT_DECLINED",
+        "ORDER_COMPENSATION_FAILED"
+      ]
+    },
+    "eventVersion": {
+      "const": 1
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "correlationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "orderId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "sku",
+        "quantity",
+        "amountInCents",
+        "currency",
+        "failureCode"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "CONFIRMED",
+            "INVENTORY_REJECTED",
+            "PAYMENT_DECLINED",
+            "COMPENSATION_FAILED"
+          ]
+        },
+        "sku": {
+          "type": "string",
+          "minLength": 1
+        },
+        "quantity": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "amountInCents": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "currency": {
+          "const": "BRL"
+        },
+        "failureCode": {
+          "type": ["string", "null"]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "eventType": { "const": "ORDER_CONFIRMED" } },
+        "required": ["eventType"]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "status": { "const": "CONFIRMED" },
+              "failureCode": { "type": "null" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventType": { "const": "ORDER_INVENTORY_REJECTED" }
+        },
+        "required": ["eventType"]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "status": { "const": "INVENTORY_REJECTED" },
+              "failureCode": {
+                "enum": [
+                  "INVENTORY_ITEM_NOT_FOUND",
+                  "INVENTORY_INSUFFICIENT_STOCK"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventType": { "const": "ORDER_PAYMENT_DECLINED" }
+        },
+        "required": ["eventType"]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "status": { "const": "PAYMENT_DECLINED" },
+              "failureCode": {
+                "enum": ["CARD_DECLINED", "PAYMENT_METHOD_REJECTED"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventType": { "const": "ORDER_COMPENSATION_FAILED" }
+        },
+        "required": ["eventType"]
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "properties": {
+              "status": { "const": "COMPENSATION_FAILED" },
+              "failureCode": { "const": "INVENTORY_COMPENSATION_FAILED" }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
