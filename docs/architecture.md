@@ -1,4 +1,4 @@
-# Planned System Architecture
+# System Architecture
 
 ## 1. Purpose
 
@@ -8,7 +8,7 @@ The application will simulate a distributed e-commerce order workflow involving 
 
 The architecture is intentionally designed to expose realistic integration risks that can be investigated through manual and automated testing.
 
-> Current implementation boundary: Inventory, Payment, and Order are implemented as independent services. The Order workflow currently integrates only with Inventory through synchronous REST. Payment orchestration, RabbitMQ events, compensation, and Notification Service remain planned.
+> Current implementation boundary: Inventory, Payment, and Order are implemented as independent services. Order orchestrates Inventory reservation, Payment, and Inventory release compensation through synchronous REST. RabbitMQ events and Notification Service remain planned.
 
 ## 2. Architecture Style
 
@@ -68,24 +68,30 @@ Implemented responsibilities in the current increment:
 * prevent duplicate order creation using an idempotency key;
 * persist the order and its current status;
 * request an inventory reservation;
-* propagate the correlation ID to dependencies;
-* distinguish terminal Inventory business rejection from recoverable technical failure.
+* request Payment after a successful reservation;
+* release Inventory after a Payment business decline;
+* propagate the correlation ID to all dependency calls;
+* distinguish terminal business outcomes from recoverable technical failures;
+* persist conditional, atomic workflow transitions.
 
-Payment processing, compensation, event publication, and order-query endpoints remain planned.
+Event publication and order-query endpoints remain planned.
 
 Endpoints:
 
 | Method | Endpoint           | Purpose                              | Status      |
 | ------ | ------------------ | ------------------------------------ | ----------- |
-| `POST` | `/orders`          | Create and process the Inventory step | Implemented |
+| `POST` | `/orders`          | Create and process the Order workflow | Implemented |
 | `GET`  | `/orders/:orderId` | Retrieve an order                    | Planned     |
 | `GET`  | `/health`          | Check service health                 | Implemented |
 
-Order statuses used by the implemented Inventory stage:
+Order statuses used by the implemented workflow:
 
 * `PENDING`
 * `INVENTORY_RESERVED`
 * `INVENTORY_REJECTED`
+* `CONFIRMED`
+* `PAYMENT_DECLINED`
+* `COMPENSATION_FAILED`
 
 ### 4.2 Inventory Service
 
@@ -121,16 +127,17 @@ Initial reservation statuses:
 
 The Payment Service will simulate payment processing.
 
-Implemented responsibilities as an independent service:
+Implemented responsibilities:
 
 * receive payment requests;
 * apply deterministic payment approval and rejection rules;
 * prevent duplicate charges using an idempotency key;
 * store payment attempts and their results;
 * return business rejections separately from technical failures;
-* expose payment data for validation.
+* expose payment data for validation;
+* support idempotent calls orchestrated by Order.
 
-Order orchestration and payment event publication remain planned.
+Payment event publication remains planned.
 
 Endpoints:
 
@@ -171,9 +178,9 @@ Planned endpoints:
 
 ## 5. Main Order Flow
 
-### 5.1 Implemented Inventory stage
+### 5.1 Implemented synchronous Order workflow
 
-The implemented flow persists the Order as `PENDING` and synchronously calls `POST /reservations` in Inventory. The dependency request uses `order:<orderId>:inventory-reservation` as its internal `Idempotency-Key` and propagates the current request's `X-Correlation-Id`.
+The implemented flow persists the Order as `PENDING`, reserves Inventory, and processes Payment. Dependency calls use deterministic internal idempotency keys and propagate the current request's `X-Correlation-Id`.
 
 ```mermaid
 sequenceDiagram
@@ -182,25 +189,40 @@ sequenceDiagram
     participant OrdersDB as orders_db
     participant Inventory as Inventory Service
     participant InventoryDB as inventory_db
+    participant Payment as Payment Service
+    participant PaymentsDB as payments_db
 
     Client->>Order: POST /orders
     Order->>OrdersDB: Persist PENDING
     Order->>Inventory: POST /reservations
     Inventory->>InventoryDB: Create idempotent reservation
     Inventory-->>Order: Reserved or business rejection
-    Order->>OrdersDB: Persist terminal Inventory state
+    Order->>OrdersDB: Persist INVENTORY_RESERVED
+    Order->>Payment: POST /payments
+    Payment->>PaymentsDB: Persist idempotent Payment
+    Payment-->>Order: APPROVED or DECLINED
+    alt Payment approved
+        Order->>OrdersDB: Persist CONFIRMED
+    else Payment declined
+        Order->>Inventory: POST /reservations/:id/release
+        Inventory->>InventoryDB: Release reservation and restore stock
+        Order->>OrdersDB: Persist PAYMENT_DECLINED
+    end
     Order-->>Client: Order response
 ```
 
 The state semantics are:
 
 * `PENDING`: the Inventory stage is unfinished and remains recoverable;
-* `INVENTORY_RESERVED`: the reservation completed and its identifier is stored on the Order;
-* `INVENTORY_REJECTED`: Inventory returned a recognized terminal business outcome, either unknown SKU or insufficient stock.
+* `INVENTORY_RESERVED`: Inventory is reserved, Payment is unfinished, and the Order remains recoverable;
+* `INVENTORY_REJECTED`: terminal recognized Inventory business outcome;
+* `CONFIRMED`: terminal state with reserved Inventory and approved Payment;
+* `PAYMENT_DECLINED`: terminal state with a persisted declined Payment and released Inventory;
+* `COMPENSATION_FAILED`: terminal state for this increment when the Payment declined but Inventory release failed.
 
-Network failure, timeout, an unexpected `409`, or an invalid success body returns `ORDER_INVENTORY_UNAVAILABLE` while preserving `PENDING`. A client replay with the same payload and external `Idempotency-Key` reuses the same Order. Correlation ID is intentionally excluded from the request fingerprint, so recovery can use a new value. The Order Service currently makes one Inventory request per client attempt and has no automatic retry.
+An Inventory technical failure returns `ORDER_INVENTORY_UNAVAILABLE` while preserving `PENDING`. A Payment technical failure returns `ORDER_PAYMENT_UNAVAILABLE` while preserving `INVENTORY_RESERVED`; replay resumes directly at Payment without reserving stock again. Correlation ID is excluded from the request fingerprint, so recovery can use a new value. The Order Service makes one dependency request per workflow step and has no automatic retry.
 
-### 5.2 Planned complete successful order
+### 5.2 Future event-enabled successful order
 
 ```mermaid
 sequenceDiagram
@@ -252,7 +274,7 @@ In the implemented Inventory stage, a recognized business rejection behaves as f
 
 Cancellation events and notifications remain planned.
 
-### 5.4 Planned Payment Decline
+### 5.4 Payment Decline
 
 When payment is declined:
 
@@ -260,14 +282,13 @@ When payment is declined:
 2. Payment returns a business decline.
 3. The order service requests the release of the reservation.
 4. Inventory is restored.
-5. The order is updated to `CANCELLED`.
-6. A `payment.declined` event is published.
-7. An `order.cancelled` event is published.
-8. A cancellation notification is eventually created.
+5. The order is updated to terminal `PAYMENT_DECLINED` with the Payment decline code.
+
+If release fails technically, the Order becomes terminal `COMPENSATION_FAILED`, the reservation may remain `RESERVED`, and the client receives a controlled `503 ORDER_COMPENSATION_FAILED`. Automatic compensation retry is not implemented yet. Decline and cancellation events remain planned.
 
 ### 5.5 Technical Failure
 
-For the implemented Inventory stage, when the dependency is unreachable, times out, or returns an unexpected response:
+For a technical Inventory failure:
 
 1. The Order remains `PENDING`.
 2. The client receives a safe `503 ORDER_INVENTORY_UNAVAILABLE` response.
@@ -275,6 +296,8 @@ For the implemented Inventory stage, when the dependency is unreachable, times o
 4. Recovery reuses the original payload and external `Idempotency-Key`.
 5. Inventory's internal idempotency key prevents duplicate stock reservation.
 6. Cross-database validation confirms one Order, one reservation, and one stock increment.
+
+For a technical Payment failure, the Order remains `INVENTORY_RESERVED`, the Inventory reservation is preserved, and no Payment row is assumed to exist. Replaying the original payload and external idempotency key continues directly at Payment and reaches `CONFIRMED` without a second reservation.
 
 ## 6. Synchronous Communication
 
@@ -291,10 +314,12 @@ Planned request headers:
 
 The `X-Correlation-Id` received by the Order Service is currently propagated to:
 
-* Inventory Service requests;
-* Order and Inventory structured logs for the relevant request.
+* Inventory reservation requests;
+* Payment requests;
+* Inventory release requests;
+* structured logs for the relevant request.
 
-Propagation to Payment, RabbitMQ events, and Notification remains planned.
+Propagation to RabbitMQ events and Notification remains planned.
 
 When the client does not provide a correlation ID, the Order Service will generate one.
 
@@ -375,14 +400,16 @@ This separation allows the project to validate:
 
 ## 9. Idempotency
 
-Idempotency will be required for operations that may be retried.
+Idempotency is required for operations that may be retried.
 
-Planned examples:
+Implemented examples:
 
 * repeated `POST /orders` requests with the same `Idempotency-Key`;
 * repeated reservation requests for the same order;
 * repeated payment requests for the same order;
-* repeated delivery of the same RabbitMQ event.
+* repeated Inventory release after a Payment decline.
+
+Repeated delivery of the same RabbitMQ event remains planned.
 
 Expected behavior:
 
@@ -396,7 +423,7 @@ Expected behavior:
 
 ## 10. Retry, Timeout, and Recovery
 
-The Order-to-Inventory HTTP request has a configurable timeout through `INVENTORY_REQUEST_TIMEOUT_MS`. The current Order client does not retry automatically. After a technical failure, the persisted `PENDING` Order is recovered through a new client request using the same external idempotency key and payload.
+Order dependency requests have configurable timeouts through `INVENTORY_REQUEST_TIMEOUT_MS` and `PAYMENT_REQUEST_TIMEOUT_MS`. The Order clients do not retry automatically. After a technical failure, `PENDING` resumes at Inventory and `INVENTORY_RESERVED` resumes at Payment through a new client request using the same external idempotency key and payload.
 
 Future retry policies may apply only to transient failures, such as:
 
