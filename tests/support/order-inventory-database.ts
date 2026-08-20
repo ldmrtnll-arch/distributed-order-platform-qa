@@ -2,6 +2,7 @@ import {
   queryInventoryDatabase,
   queryOrderDatabase,
 } from './database.js';
+import { cleanupPaymentsByOrderIds } from './order-payment-database.js';
 
 interface CountRow {
   count: number;
@@ -167,11 +168,20 @@ export async function countInventoryReservationsBySku(
 export async function cleanupOrderByIdempotencyKey(
   idempotencyKey: string,
 ): Promise<void> {
-  await queryOrderDatabase(
-    `DELETE FROM orders
+  const orders = await queryOrderDatabase<{ orderId: string }>(
+    `SELECT order_id AS "orderId"
+     FROM orders
      WHERE idempotency_key = $1`,
     [idempotencyKey],
   );
+  await Promise.all([
+    cleanupPaymentsByOrderIds(orders.map((order) => order.orderId)),
+    queryOrderDatabase(
+      `DELETE FROM orders
+       WHERE idempotency_key = $1`,
+      [idempotencyKey],
+    ),
+  ]);
 }
 
 export async function cleanupOrderInventoryFixture({
@@ -183,7 +193,15 @@ export async function cleanupOrderInventoryFixture({
   sku: string;
   totalQuantity: number;
 }): Promise<void> {
+  const orders = await queryOrderDatabase<{ orderId: string }>(
+    `SELECT order_id AS "orderId"
+     FROM orders
+     WHERE idempotency_key = $1`,
+    [idempotencyKey],
+  );
+
   await Promise.all([
+    cleanupPaymentsByOrderIds(orders.map((order) => order.orderId)),
     queryOrderDatabase(
       `DELETE FROM orders
        WHERE idempotency_key = $1`,

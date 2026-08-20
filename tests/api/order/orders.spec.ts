@@ -18,6 +18,10 @@ import {
   readInventoryReservationsByOrderId,
   readOrderById,
 } from '../../support/order-inventory-database.js';
+import {
+  countPaymentsByOrderId,
+  readPaymentsByOrderId,
+} from '../../support/order-payment-database.js';
 
 interface OrderResponse {
   orderId: string;
@@ -38,6 +42,25 @@ const publicOrderFields = [
   'sku',
   'status',
 ];
+
+async function expectApprovedPayment(
+  orderId: string,
+  paymentId: string,
+): Promise<void> {
+  const payments = await readPaymentsByOrderId(orderId);
+  expect(payments).toHaveLength(1);
+  expect(payments[0]).toMatchObject({
+    paymentId,
+    orderId,
+    amountInCents: 5990,
+    currency: 'BRL',
+    status: 'APPROVED',
+    declineCode: null,
+    idempotencyKey: `order:${orderId}:payment`,
+  });
+  expect(payments[0]?.requestFingerprint).toMatch(/^[0-9a-f]{64}$/);
+  expect(JSON.stringify(payments)).not.toMatch(/paymentToken|tok_approved/u);
+}
 
 async function readPendingOrder(
   response: APIResponse,
@@ -197,7 +220,7 @@ async function expectOrderRequestError(
 }
 
 test.describe('POST /orders', () => {
-  test('creates an inventory-reserved order and replays the same request idempotently', async ({
+  test('creates a confirmed order and replays the same request idempotently', async ({
     request,
   }) => {
     const fixture = orderInventoryFixtures.happyPath;
@@ -246,7 +269,7 @@ test.describe('POST /orders', () => {
       const createdOrder = await readPendingOrder(
         creationResponse,
         201,
-        'INVENTORY_RESERVED',
+        'CONFIRMED',
       );
 
       expect(createdOrder).toEqual({
@@ -255,7 +278,7 @@ test.describe('POST /orders', () => {
         quantity: 2,
         amountInCents: 5990,
         currency: 'BRL',
-        status: 'INVENTORY_RESERVED',
+        status: 'CONFIRMED',
         createdAt: createdOrder.createdAt,
       });
       expectSafeOrderBody(createdOrder, idempotencyKey, [
@@ -268,8 +291,7 @@ test.describe('POST /orders', () => {
       expect(createdOrderRow).toBeDefined();
       expect(createdOrderRow).toMatchObject({
         orderId: createdOrder.orderId,
-        status: 'INVENTORY_RESERVED',
-        paymentId: null,
+        status: 'CONFIRMED',
         failureCode: null,
       });
       expect(createdOrderRow?.inventoryReservationId).toMatch(
@@ -279,6 +301,13 @@ test.describe('POST /orders', () => {
         createdOrderRow?.inventoryReservationId;
       expect(inventoryReservationId).not.toBeNull();
       expect(inventoryReservationId).toBeDefined();
+      expect(createdOrderRow?.paymentId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
+      const paymentId = createdOrderRow?.paymentId;
+      if (paymentId === null || paymentId === undefined) {
+        throw new Error('Confirmed Order has no Payment.');
+      }
 
       const reservationRows =
         await readInventoryReservationsByOrderId(createdOrder.orderId);
@@ -302,6 +331,7 @@ test.describe('POST /orders', () => {
         reservedQuantity: 2,
         availableQuantity: fixture.totalQuantity - 2,
       });
+      await expectApprovedPayment(createdOrder.orderId, paymentId);
 
       expectSafeOrderBody(createdOrder, idempotencyKey, [
         creationCorrelationId,
@@ -323,13 +353,13 @@ test.describe('POST /orders', () => {
       const replayedOrder = await readPendingOrder(
         replayResponse,
         200,
-        'INVENTORY_RESERVED',
+        'CONFIRMED',
       );
 
       expect(replayedOrder).toEqual(createdOrder);
       expect(replayedOrder.orderId).toBe(createdOrder.orderId);
       expect(replayedOrder.createdAt).toBe(createdOrder.createdAt);
-      expect(replayedOrder.status).toBe('INVENTORY_RESERVED');
+      expect(replayedOrder.status).toBe('CONFIRMED');
       expectSafeOrderBody(replayedOrder, idempotencyKey, [
         creationCorrelationId,
         replayCorrelationId,
@@ -340,9 +370,9 @@ test.describe('POST /orders', () => {
       expect(replayedOrderRows).toHaveLength(1);
       expect(replayedOrderRows[0]).toMatchObject({
         orderId: createdOrder.orderId,
-        status: 'INVENTORY_RESERVED',
+        status: 'CONFIRMED',
         inventoryReservationId,
-        paymentId: null,
+        paymentId,
         failureCode: null,
       });
       expect(replayedOrderRows[0]?.updatedAt.toISOString()).toBe(
@@ -355,6 +385,7 @@ test.describe('POST /orders', () => {
 
       const productAfterReplay = await readInventoryProduct(fixture.sku);
       expect(productAfterReplay).toEqual(productAfterCreation);
+      await expectApprovedPayment(createdOrder.orderId, paymentId);
     } finally {
       await cleanupOrderInventoryFixture({
         idempotencyKey,
@@ -477,7 +508,7 @@ test.describe('POST /orders', () => {
           const createdOrder = await readPendingOrder(
             creationResponse,
             201,
-            'INVENTORY_RESERVED',
+            'CONFIRMED',
           );
           expect(createdOrder).toEqual({
             orderId: createdOrder.orderId,
@@ -485,7 +516,7 @@ test.describe('POST /orders', () => {
             quantity: 2,
             amountInCents: 5990,
             currency: 'BRL',
-            status: 'INVENTORY_RESERVED',
+            status: 'CONFIRMED',
             createdAt: createdOrder.createdAt,
           });
           expectSafeOrderBody(createdOrder, idempotencyKey, [
@@ -507,8 +538,7 @@ test.describe('POST /orders', () => {
           }
           expect(createdOrderRow).toMatchObject({
             orderId: createdOrder.orderId,
-            status: 'INVENTORY_RESERVED',
-            paymentId: null,
+            status: 'CONFIRMED',
             failureCode: null,
           });
           expect(createdOrderRow.inventoryReservationId).toMatch(
@@ -520,6 +550,14 @@ test.describe('POST /orders', () => {
             throw new Error('Created Order has no Inventory reservation.');
           }
           const createdUpdatedAt = createdOrderRow.updatedAt.toISOString();
+          expect(createdOrderRow.paymentId).toMatch(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+          );
+          const paymentId = createdOrderRow.paymentId;
+          if (paymentId === null) {
+            throw new Error('Confirmed Order has no Payment.');
+          }
+          await expectApprovedPayment(createdOrder.orderId, paymentId);
 
           expect(createdReservations).toEqual([
             {
@@ -588,9 +626,9 @@ test.describe('POST /orders', () => {
           expect(orderRowsAfterConflict).toHaveLength(1);
           expect(orderRowsAfterConflict[0]).toMatchObject({
             orderId: createdOrder.orderId,
-            status: 'INVENTORY_RESERVED',
+            status: 'CONFIRMED',
             inventoryReservationId,
-            paymentId: null,
+            paymentId,
             failureCode: null,
           });
           expect(orderRowsAfterConflict[0]?.updatedAt.toISOString()).toBe(
@@ -602,6 +640,7 @@ test.describe('POST /orders', () => {
             createdReservationId,
           );
           expect(productAfterConflict).toEqual(productAfterCreation);
+          await expectApprovedPayment(createdOrder.orderId, paymentId);
 
           if (conflictCase.changedField === 'sku') {
             expect(
@@ -626,12 +665,12 @@ test.describe('POST /orders', () => {
           const replayedOrder = await readPendingOrder(
             replayResponse,
             200,
-            'INVENTORY_RESERVED',
+            'CONFIRMED',
           );
           expect(replayedOrder).toEqual(createdOrder);
           expect(replayedOrder.orderId).toBe(createdOrder.orderId);
           expect(replayedOrder.createdAt).toBe(createdOrder.createdAt);
-          expect(replayedOrder.status).toBe('INVENTORY_RESERVED');
+          expect(replayedOrder.status).toBe('CONFIRMED');
           expectSafeOrderBody(replayedOrder, idempotencyKey, [
             creationCorrelationId,
             conflictCorrelationId,
@@ -658,9 +697,9 @@ test.describe('POST /orders', () => {
           expect(orderRowsAfterReplay).toHaveLength(1);
           expect(orderRowsAfterReplay[0]).toMatchObject({
             orderId: createdOrder.orderId,
-            status: 'INVENTORY_RESERVED',
+            status: 'CONFIRMED',
             inventoryReservationId,
-            paymentId: null,
+            paymentId,
             failureCode: null,
           });
           expect(orderRowsAfterReplay[0]?.updatedAt.toISOString()).toBe(
@@ -672,6 +711,7 @@ test.describe('POST /orders', () => {
             createdReservationId,
           );
           expect(productAfterReplay).toEqual(productAfterCreation);
+          await expectApprovedPayment(createdOrder.orderId, paymentId);
         } finally {
           await cleanupOrderInventoryFixture({
             idempotencyKey,
@@ -793,6 +833,7 @@ test.describe('POST /orders', () => {
         expect(reservationsByOrder).toHaveLength(0);
         expect(productCountAfterCreation).toBe(0);
         expect(reservationsBySkuAfterCreation).toBe(0);
+        expect(await countPaymentsByOrderId(createdOrder.orderId)).toBe(0);
 
         const replayResponse = await request.post(
           'http://127.0.0.1:3001/orders',
@@ -850,6 +891,7 @@ test.describe('POST /orders', () => {
         expect(reservationsByOrderAfterReplay).toHaveLength(0);
         expect(productCountAfterReplay).toBe(0);
         expect(reservationsBySkuAfterReplay).toBe(0);
+        expect(await countPaymentsByOrderId(createdOrder.orderId)).toBe(0);
       } finally {
         await cleanupOrderByIdempotencyKey(idempotencyKey);
 
@@ -968,6 +1010,7 @@ test.describe('POST /orders', () => {
         expect(reservationsByOrder).toHaveLength(0);
         expect(reservationsBySkuAfterCreation).toBe(0);
         expect(productAfterCreation).toEqual(initialProduct);
+        expect(await countPaymentsByOrderId(createdOrder.orderId)).toBe(0);
 
         const replayResponse = await request.post(
           'http://127.0.0.1:3001/orders',
@@ -1025,6 +1068,7 @@ test.describe('POST /orders', () => {
         expect(reservationsByOrderAfterReplay).toHaveLength(0);
         expect(reservationsBySkuAfterReplay).toBe(0);
         expect(productAfterReplay).toEqual(initialProduct);
+        expect(await countPaymentsByOrderId(createdOrder.orderId)).toBe(0);
       } finally {
         await cleanupOrderInventoryFixture({
           idempotencyKey,
@@ -1049,6 +1093,152 @@ test.describe('POST /orders', () => {
         });
       }
     });
+  });
+
+  test.describe('payment decline compensation', () => {
+    const declineCases = [
+      {
+        title: 'compensates Inventory after a card decline',
+        fixture: orderInventoryFixtures.paymentDeclined,
+        paymentToken: 'tok_declined',
+        failureCode: 'CARD_DECLINED',
+      },
+      {
+        title: 'compensates Inventory after a payment method rejection',
+        fixture: orderInventoryFixtures.paymentMethodRejected,
+        paymentToken: 'tok_unknown_order_test',
+        failureCode: 'PAYMENT_METHOD_REJECTED',
+      },
+    ] as const;
+
+    for (const declineCase of declineCases) {
+      test(declineCase.title, async ({ request }) => {
+        const { fixture } = declineCase;
+        const idempotencyKey = `order-payment-decline-${randomUUID()}`;
+        const requestBody: OrderRequestBody = {
+          sku: fixture.sku,
+          quantity: 2,
+          amountInCents: 5990,
+          currency: 'BRL',
+          paymentToken: declineCase.paymentToken,
+        };
+
+        try {
+          const creationResponse = await request.post(
+            'http://127.0.0.1:3001/orders',
+            {
+              headers: {
+                'Idempotency-Key': idempotencyKey,
+                'X-Correlation-Id': `correlation-${randomUUID()}`,
+              },
+              data: requestBody,
+            },
+          );
+          expect(creationResponse.headers()).not.toHaveProperty(
+            'idempotent-replay',
+          );
+          const createdOrder = await readPendingOrder(
+            creationResponse,
+            201,
+            'PAYMENT_DECLINED',
+          );
+          expectSafeOrderBody(createdOrder, idempotencyKey, [
+            declineCase.paymentToken,
+            declineCase.failureCode,
+          ]);
+
+          const orderRows = await readOrderById(createdOrder.orderId);
+          expect(orderRows).toHaveLength(1);
+          const orderRow = orderRows[0];
+          expect(orderRow).toMatchObject({
+            status: 'PAYMENT_DECLINED',
+            failureCode: declineCase.failureCode,
+          });
+          expect(orderRow?.inventoryReservationId).toMatch(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+          );
+          expect(orderRow?.paymentId).toMatch(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+          );
+
+          const payments = await readPaymentsByOrderId(createdOrder.orderId);
+          expect(payments).toHaveLength(1);
+          expect(payments[0]).toMatchObject({
+            paymentId: orderRow?.paymentId,
+            orderId: createdOrder.orderId,
+            amountInCents: 5990,
+            currency: 'BRL',
+            status: 'DECLINED',
+            declineCode: declineCase.failureCode,
+            idempotencyKey: `order:${createdOrder.orderId}:payment`,
+          });
+
+          const reservations =
+            await readInventoryReservationsByOrderId(createdOrder.orderId);
+          expect(reservations).toHaveLength(1);
+          expect(reservations[0]).toMatchObject({
+            reservationId: orderRow?.inventoryReservationId,
+            orderId: createdOrder.orderId,
+            sku: fixture.sku,
+            quantity: 2,
+            status: 'RELEASED',
+            releaseIdempotencyKey:
+              `order:${createdOrder.orderId}:inventory-release`,
+          });
+          expect(reservations[0]?.releaseRequestFingerprint).toMatch(
+            /^[0-9a-f]{64}$/u,
+          );
+          expect(reservations[0]?.releasedAt).toBeInstanceOf(Date);
+          expect(await readInventoryProduct(fixture.sku)).toEqual({
+            sku: fixture.sku,
+            totalQuantity: fixture.totalQuantity,
+            reservedQuantity: 0,
+            availableQuantity: fixture.totalQuantity,
+          });
+
+          const updatedAt = orderRow?.updatedAt.toISOString();
+          const replayResponse = await request.post(
+            'http://127.0.0.1:3001/orders',
+            {
+              headers: {
+                'Idempotency-Key': idempotencyKey,
+                'X-Correlation-Id': `correlation-${randomUUID()}`,
+              },
+              data: requestBody,
+            },
+          );
+          expect(replayResponse.headers()['idempotent-replay']).toBe('true');
+          expect(
+            await readPendingOrder(replayResponse, 200, 'PAYMENT_DECLINED'),
+          ).toEqual(createdOrder);
+          expect(await readOrderById(createdOrder.orderId)).toEqual(orderRows);
+          expect(
+            (await readOrderById(createdOrder.orderId))[0]?.updatedAt.toISOString(),
+          ).toBe(updatedAt);
+          expect(await readPaymentsByOrderId(createdOrder.orderId)).toEqual(
+            payments,
+          );
+          expect(
+            await readInventoryReservationsByOrderId(createdOrder.orderId),
+          ).toEqual(reservations);
+          expect(await countPaymentsByOrderId(createdOrder.orderId)).toBe(1);
+        } finally {
+          await cleanupOrderInventoryFixture({
+            idempotencyKey,
+            sku: fixture.sku,
+            totalQuantity: fixture.totalQuantity,
+          });
+          expect(await countOrdersByIdempotencyKey(idempotencyKey)).toBe(0);
+          expect(await countInventoryReservationsBySku(fixture.sku)).toBe(0);
+          expect(await readInventoryProduct(fixture.sku)).toEqual({
+            sku: fixture.sku,
+            totalQuantity: fixture.totalQuantity,
+            reservedQuantity: 0,
+            availableQuantity: fixture.totalQuantity,
+          });
+        }
+      });
+    }
   });
 
   test.describe('request validation', () => {
@@ -1494,12 +1684,12 @@ test.describe('POST /orders', () => {
         const createdOrder = await readPendingOrder(
           creationResponse,
           201,
-          'INVENTORY_RESERVED',
+          'CONFIRMED',
         );
         const replayedOrder = await readPendingOrder(
           replayResponse,
           200,
-          'INVENTORY_RESERVED',
+          'CONFIRMED',
         );
 
         expect(createdOrder).toEqual({
@@ -1508,13 +1698,13 @@ test.describe('POST /orders', () => {
           quantity: 2,
           amountInCents: 5990,
           currency: 'BRL',
-          status: 'INVENTORY_RESERVED',
+          status: 'CONFIRMED',
           createdAt: createdOrder.createdAt,
         });
         expect(replayedOrder).toEqual(createdOrder);
         expect(replayedOrder.orderId).toBe(createdOrder.orderId);
         expect(replayedOrder.createdAt).toBe(createdOrder.createdAt);
-        expect(replayedOrder.status).toBe('INVENTORY_RESERVED');
+        expect(replayedOrder.status).toBe('CONFIRMED');
         expectSafeOrderBody(createdOrder, idempotencyKey, [
           firstCorrelationId,
           secondCorrelationId,
@@ -1547,8 +1737,7 @@ test.describe('POST /orders', () => {
         }
         expect(orderRow).toMatchObject({
           orderId: createdOrder.orderId,
-          status: 'INVENTORY_RESERVED',
-          paymentId: null,
+          status: 'CONFIRMED',
           failureCode: null,
         });
         expect(orderRow.inventoryReservationId).toMatch(
@@ -1557,6 +1746,13 @@ test.describe('POST /orders', () => {
         const inventoryReservationId = orderRow.inventoryReservationId;
         if (inventoryReservationId === null) {
           throw new Error('Created Order has no Inventory reservation.');
+        }
+        expect(orderRow.paymentId).toMatch(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+        );
+        const paymentId = orderRow.paymentId;
+        if (paymentId === null) {
+          throw new Error('Confirmed Order has no Payment.');
         }
 
         expect(reservationCount).toBe(1);
@@ -1579,6 +1775,7 @@ test.describe('POST /orders', () => {
           availableQuantity: fixture.totalQuantity - 2,
         });
         expect(productAfterRequests?.reservedQuantity).not.toBe(4);
+        await expectApprovedPayment(createdOrder.orderId, paymentId);
 
         expectSafeOrderBody(createdOrder, idempotencyKey, [
           firstCorrelationId,

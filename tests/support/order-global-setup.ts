@@ -23,11 +23,18 @@ config({
 export default async function orderGlobalSetup(): Promise<void> {
   const orderConnectionString = process.env.ORDER_DATABASE_URL;
   const inventoryConnectionString = process.env.INVENTORY_DATABASE_URL;
+  const paymentConnectionString = process.env.PAYMENT_DATABASE_URL;
   if (
     orderConnectionString === undefined ||
     orderConnectionString.trim() === ''
   ) {
     throw new Error('ORDER_DATABASE_URL is required for order resilience.');
+  }
+  if (
+    paymentConnectionString === undefined ||
+    paymentConnectionString.trim() === ''
+  ) {
+    throw new Error('PAYMENT_DATABASE_URL is required for order resilience.');
   }
   if (
     inventoryConnectionString === undefined ||
@@ -64,6 +71,17 @@ export default async function orderGlobalSetup(): Promise<void> {
       readFile(path.join(inventoryDatabaseDirectory, relativePath), 'utf8'),
     ),
   );
+  const paymentMigration = await readFile(
+    path.join(
+      repositoryRoot,
+      'services',
+      'payment-service',
+      'database',
+      'migrations',
+      '001_create_payments.sql',
+    ),
+    'utf8',
+  );
   const orderClient = new Client({ connectionString: orderConnectionString });
 
   try {
@@ -82,6 +100,11 @@ export default async function orderGlobalSetup(): Promise<void> {
     orderInventoryFixtures.resilienceTimeout,
     orderInventoryFixtures.resilienceUnexpected409,
     orderInventoryFixtures.resilienceInvalidContract,
+    orderInventoryFixtures.paymentUnavailable,
+    orderInventoryFixtures.paymentTimeout,
+    orderInventoryFixtures.paymentInvalidContract,
+    orderInventoryFixtures.paymentUnexpectedStatus,
+    orderInventoryFixtures.compensationFailed,
   ];
 
   try {
@@ -129,5 +152,16 @@ export default async function orderGlobalSetup(): Promise<void> {
     throw error;
   } finally {
     await inventoryClient.end();
+  }
+
+  const paymentClient = new Client({
+    connectionString: paymentConnectionString,
+  });
+  try {
+    await paymentClient.connect();
+    await paymentClient.query(paymentMigration);
+    await paymentClient.query('DELETE FROM payments');
+  } finally {
+    await paymentClient.end();
   }
 }

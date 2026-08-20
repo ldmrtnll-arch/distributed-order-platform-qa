@@ -13,6 +13,10 @@ import {
   type OrderDatabaseRow,
 } from '../../support/order-inventory-database.js';
 import { orderInventoryFixtures } from '../../support/order-inventory-fixtures.js';
+import {
+  readPaymentsByOrderId,
+  type PaymentDatabaseRow,
+} from '../../support/order-payment-database.js';
 
 interface OrderResponse {
   orderId: string;
@@ -71,11 +75,11 @@ async function readOrder(
   expect(body.orderId).toMatch(
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
   );
-  expect(body.status).toBe('INVENTORY_RESERVED');
+  expect(body.status).toBe('CONFIRMED');
   return body;
 }
 
-function expectReservedRow(
+function expectConfirmedRow(
   row: OrderDatabaseRow,
   order: OrderResponse,
   idempotencyKey: string,
@@ -87,11 +91,13 @@ function expectReservedRow(
   expect(row.quantity).toBe(2);
   expect(row.amount).toBe(5990);
   expect(row.currency).toBe('BRL');
-  expect(row.status).toBe('INVENTORY_RESERVED');
+  expect(row.status).toBe('CONFIRMED');
   expect(row.inventoryReservationId).toMatch(
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
   );
-  expect(row.paymentId).toBeNull();
+  expect(row.paymentId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  );
   expect(row.failureCode).toBeNull();
   expect(row.idempotencyKey === idempotencyKey).toBe(true);
   expect(row.requestFingerprint).toMatch(/^[0-9a-f]{64}$/);
@@ -100,8 +106,27 @@ function expectReservedRow(
   expect(row.createdAt.toISOString()).toBe(order.createdAt);
 }
 
+async function expectApprovedPaymentRow(
+  orderId: string,
+  paymentId: string,
+): Promise<PaymentDatabaseRow[]> {
+  const payments = await readPaymentsByOrderId(orderId);
+  expect(payments).toHaveLength(1);
+  expect(payments[0]).toMatchObject({
+    paymentId,
+    orderId,
+    amountInCents: 5990,
+    currency: 'BRL',
+    status: 'APPROVED',
+    declineCode: null,
+    idempotencyKey: `order:${orderId}:payment`,
+  });
+  expect(payments[0]?.requestFingerprint).toMatch(/^[0-9a-f]{64}$/u);
+  return payments;
+}
+
 test.describe('POST /orders database consistency', () => {
-  test('persists an inventory-reserved order with the expected cross-database state and fingerprint', async ({
+  test('persists a confirmed order consistently across Order, Inventory, and Payment', async ({
     request,
   }) => {
     const fixture = orderInventoryFixtures.database;
@@ -140,7 +165,7 @@ test.describe('POST /orders database consistency', () => {
         quantity: 2,
         amountInCents: 5990,
         currency: 'BRL',
-        status: 'INVENTORY_RESERVED',
+        status: 'CONFIRMED',
         createdAt: order.createdAt,
       });
 
@@ -150,10 +175,14 @@ test.describe('POST /orders database consistency', () => {
       const row = rows[0];
       expect(row).toBeDefined();
       if (row === undefined) throw new Error('Persisted order was not found.');
-      expectReservedRow(row, order, idempotencyKey, fixture.sku);
+      expectConfirmedRow(row, order, idempotencyKey, fixture.sku);
       const inventoryReservationId = row.inventoryReservationId;
       if (inventoryReservationId === null) {
         throw new Error('Persisted Order has no Inventory reservation.');
+      }
+      const paymentId = row.paymentId;
+      if (paymentId === null) {
+        throw new Error('Persisted Order has no Payment.');
       }
 
       const expectedFingerprint = createHash('sha256')
@@ -195,6 +224,7 @@ test.describe('POST /orders database consistency', () => {
         reservedQuantity: 2,
         availableQuantity: fixture.totalQuantity - 2,
       });
+      await expectApprovedPaymentRow(order.orderId, paymentId);
 
       const tokenColumns = await queryOrderDatabase<ColumnRow>(
         `
@@ -272,7 +302,7 @@ test.describe('POST /orders database consistency', () => {
       if (rowBefore === undefined) {
         throw new Error('Persisted order was not found.');
       }
-      expectReservedRow(
+      expectConfirmedRow(
         rowBefore,
         createdOrder,
         idempotencyKey,
@@ -281,6 +311,10 @@ test.describe('POST /orders database consistency', () => {
       const inventoryReservationId = rowBefore.inventoryReservationId;
       if (inventoryReservationId === null) {
         throw new Error('Persisted Order has no Inventory reservation.');
+      }
+      const paymentId = rowBefore.paymentId;
+      if (paymentId === null) {
+        throw new Error('Persisted Order has no Payment.');
       }
 
       const reservationsBefore =
@@ -304,6 +338,10 @@ test.describe('POST /orders database consistency', () => {
         reservedQuantity: 2,
         availableQuantity: fixture.totalQuantity - 2,
       });
+      const paymentsBefore = await expectApprovedPaymentRow(
+        createdOrder.orderId,
+        paymentId,
+      );
 
       const replayResponse = await request.post(orderUrl, {
         headers: {
@@ -324,7 +362,7 @@ test.describe('POST /orders database consistency', () => {
       expect(rowAfter).toBeDefined();
       if (rowAfter === undefined) throw new Error('Persisted order was not found.');
       expect(rowAfter.orderId).toBe(createdOrder.orderId);
-      expect(rowAfter.status).toBe('INVENTORY_RESERVED');
+      expect(rowAfter.status).toBe('CONFIRMED');
       expect(rowAfter.inventoryReservationId).toBe(inventoryReservationId);
       expect(rowAfter.createdAt.toISOString()).toBe(
         rowBefore.createdAt.toISOString(),
@@ -344,6 +382,9 @@ test.describe('POST /orders database consistency', () => {
       expect(productAfterReplay).toEqual(productAfterCreation);
       expect(productAfterReplay?.reservedQuantity).toBe(2);
       expect(productAfterReplay?.reservedQuantity).not.toBe(4);
+      expect(await readPaymentsByOrderId(createdOrder.orderId)).toEqual(
+        paymentsBefore,
+      );
     } finally {
       await cleanupOrderInventoryFixture({
         idempotencyKey,
@@ -442,10 +483,14 @@ test.describe('POST /orders database consistency', () => {
       const row = rows[0];
       expect(row).toBeDefined();
       if (row === undefined) throw new Error('Persisted order was not found.');
-      expectReservedRow(row, createdOrder, idempotencyKey, fixture.sku);
+      expectConfirmedRow(row, createdOrder, idempotencyKey, fixture.sku);
       const inventoryReservationId = row.inventoryReservationId;
       if (inventoryReservationId === null) {
         throw new Error('Persisted Order has no Inventory reservation.');
+      }
+      const paymentId = row.paymentId;
+      if (paymentId === null) {
+        throw new Error('Persisted Order has no Payment.');
       }
 
       const reservationRows =
@@ -472,6 +517,7 @@ test.describe('POST /orders database consistency', () => {
         availableQuantity: fixture.totalQuantity - 2,
       });
       expect(productAfterRequests?.reservedQuantity).not.toBe(4);
+      await expectApprovedPaymentRow(createdOrder.orderId, paymentId);
     } finally {
       await cleanupOrderInventoryFixture({
         idempotencyKey,
